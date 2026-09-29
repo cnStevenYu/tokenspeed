@@ -35,6 +35,13 @@ how long the caller may hold each piece:
 | `transfer` | the PD peer's CONTROL face — bootstrap register/abort, event polling — or None outside PD | held by the PD hooks |
 | `encoder_model_facts` | a callable resolving the encoder facts EPD admission needs (raises on text-only) | consumed at startup, past the EPD gate |
 
+Encoder facts describe the transferred tensor, independently of the language
+embedding width. A model may declare `get_encoder_output_spec()` as a width and
+dtype pair, including integer dtypes for discrete visual tokens. The builder
+resolves this once; admission keeps only the resulting values. Converting an
+encoded payload into language embeddings remains model work on the forward
+thread, after all required items and prefill ranks have completed admission.
+
 `build_device_side` builds the device side **complete**, not built-then-wired:
 it constructs the transfer peer from its prepared components and startup
 arguments, and reads the engine's role off the peer once, at construction. An

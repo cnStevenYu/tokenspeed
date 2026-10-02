@@ -205,11 +205,12 @@ class CacheArenaCudaTest(unittest.TestCase):
         arena.zero_blocks({"history": np.asarray([1])})
         torch.cuda.synchronize()
 
-        # history.k is a per-token field (planned shape leads with P=4), so
-        # its view is token-indexed: block 1 covers tokens [4, 8).
-        self.assertTrue(bool((history[:4] == 7).all()))
-        self.assertTrue(bool((history[4:8] == 0).all()))
-        self.assertTrue(bool((history[8:] == 7).all()))
+        # The fixture has field shape (4,) but rows_per_page=2, so the
+        # view remains page-indexed. Block 1 clears its four-byte row.
+        self.assertEqual(tuple(history.shape), (5, 4))
+        expected = torch.full_like(history, 7)
+        expected[1].zero_()
+        self.assertTrue(torch.equal(history, expected))
         self.assertTrue(bool((state == 9).all()))
 
     def test_zero_blocks_rejects_out_of_range_block(self):
@@ -296,8 +297,10 @@ class CacheArenaCudaTest(unittest.TestCase):
             {"state": np.asarray([1, state_pages - 1]), "history": np.asarray([1])}
         )
         torch.cuda.synchronize()
-        self.assertTrue(bool((history[4:8] == 0).all()))
-        self.assertTrue(bool((history[:4] == 7).all()))
+        # This field is page-indexed: shape[0]=4 differs from rows_per_page=2.
+        expected = torch.full_like(history, 7)
+        expected[1].zero_()
+        self.assertTrue(torch.equal(history, expected))
         # A fieldless group's ids are still validated.
         with self.assertRaises(IndexError):
             stage0.zero_blocks({"state": np.asarray([state_pages])})

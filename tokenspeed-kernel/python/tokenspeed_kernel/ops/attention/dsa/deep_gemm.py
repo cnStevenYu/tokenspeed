@@ -71,6 +71,9 @@ def _row_invariant_topk(
             logits, (0, int(topk) - logits.shape[1]), value=float("-inf")
         )
     deterministic_decode_topk(logits, out, int(topk))
+    # Canonicalize before logical offsets become physical slots. Allocation
+    # and relocation must not change the attention reduction order.
+    out.copy_(out.sort(dim=-1).values)
 
 
 def _prepare_logits_for_topk(logits: torch.Tensor) -> torch.Tensor:

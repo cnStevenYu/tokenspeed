@@ -931,6 +931,7 @@ class DSABackend(PagedAttentionBackend):
         bs: int,
         topk_indices: torch.Tensor | None = None,
         topk_lens: torch.Tensor | None = None,
+        topk_order_keys: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         self._validate_logit_cap(layer.logit_cap)
@@ -942,6 +943,7 @@ class DSABackend(PagedAttentionBackend):
                 bs=bs,
                 topk_indices=topk_indices,
                 topk_lens=topk_lens,
+                topk_order_keys=topk_order_keys,
             )
         if len(self.dcp_group) > 1:
             raise ValueError("Sharded DSA decode requires global top-k selection")
@@ -1179,6 +1181,7 @@ class DSABackend(PagedAttentionBackend):
         bs: int,
         topk_indices: torch.Tensor,
         topk_lens: torch.Tensor | None,
+        topk_order_keys: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.kernel_page_size != DSA_SPARSE_PAGE_SIZE:
             raise RuntimeError(
@@ -1297,6 +1300,7 @@ class DSABackend(PagedAttentionBackend):
             sparse_kv_cache=None,
             topk_slots=topk_slots,
             topk_lens=topk_lens,
+            topk_order_keys=topk_order_keys,
             max_seqlen_k=max_seqlen_k,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,

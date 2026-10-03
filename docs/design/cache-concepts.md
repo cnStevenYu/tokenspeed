@@ -1496,7 +1496,13 @@ plan/arena/`CacheBlock` view, mirrored by the host tier. Specifically:
   contract carries no parallel `field_dtypes` tuple. ✓
 * The arena owns the allocation and materializes every planned field view in
   its constructor, so `field(field_id)` is a lookup with no dtype argument and
-  no lazy-bind state. `CachePool.store_dtype` means one thing: how a pool
+  no lazy-bind state. Ordinary history fields fold their page axis only when
+  their leading extent matches the prefix grain; compressor state keeps its
+  page axis even though its leading extent matches the group's row count.
+  Offloaded history fields fold by their own physical row grain, preserving
+  flat row addressing when that grain differs from the prefix grain.
+  These are views of the allocation, never reshaped copies.
+  `CachePool.store_dtype` means one thing: how a pool
   reinterprets *input* tensors before a write. A pool allocates nothing —
   `_bind_layer_planes` walks `plan.fields` once and arranges this view's layer
   window into the per-layer buffers its kernels read, with each subclass

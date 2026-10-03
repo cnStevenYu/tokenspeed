@@ -51,7 +51,8 @@ from tokenspeed.runtime.pd.cache_protocol import (
 )
 
 
-def test_segmented_host_device_contract_and_budget():
+@pytest.mark.parametrize("prefix_granularity", [8, 16])
+def test_segmented_host_device_contract_and_budget(prefix_granularity):
     group = CacheGroupSpec(
         group_id="full_attention",
         retention="full_history",
@@ -63,8 +64,8 @@ def test_segmented_host_device_contract_and_budget():
     names = ("layer.0.latent_kv", "layer.1.latent_kv")
     layout = pack(
         ((group, tuple(CacheFieldSpec(n, n, (8, 1, 32), "bfloat16") for n in names)),),
-        prefix_granularity=8,
-        cache_blocks_per_lcm_block={"full_attention": 1},
+        prefix_granularity=prefix_granularity,
+        cache_blocks_per_lcm_block={"full_attention": prefix_granularity // 8},
         alignment=256,
         max_padding_fraction=0.25,
     )
@@ -100,6 +101,8 @@ def test_segmented_host_device_contract_and_budget():
     destination = restored.field_address(base, names[1]) + 8 * 32 * 2
     ctypes.memmove(destination, source.data_ptr(), source.numel() * 2)
     assert torch.equal(arena.field(names[1])[8, 0], source)
+    # Sixteen LCM blocks plus the group's dummy page share the flat row view.
+    assert arena.field(names[1]).shape == (16 * prefix_granularity + 8, 1, 32)
     assert arena.compute_field(names[1]).is_cuda
     assert (
         arena.compute_field(names[1]).shape[0]
@@ -122,6 +125,7 @@ def test_segmented_host_device_contract_and_budget():
     arena.zero_blocks({"full_attention": np.array([1], dtype=np.int32)})
     torch.cuda.synchronize()
     assert arena.field(names[1])[8:16].eq(0).all()
-    assert arena.field(names[0])[8:16].eq(0).all()
+    device_pages = arena.field(names[0]).view(-1, 8, 1, 32)
+    assert device_pages[1].eq(0).all()
     with pytest.raises(ValueError, match="complete plan"):
         replace(contract, field_addresses={names[1]: destination})

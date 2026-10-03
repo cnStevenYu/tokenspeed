@@ -256,7 +256,15 @@ class CacheArena:
             offset // field.element_size,
         )
         spec = self._cache_group_specs_by_id[field.group_id]
-        if spec.family == "state" or field.shape[0] != spec.rows_per_page:
+        # Keep ordinary fields' addressing contract. History groups can also
+        # contain page-indexed compressor state whose shape starts with rows.
+        token_rows = self.plan.prefix_granularity
+        if (
+            self.offload_config is not None
+            and field.field_id in self.offload_config.field_ids
+        ):
+            token_rows = spec.rows_per_page
+        if spec.family == "state" or field.shape[0] != token_rows:
             return pages
         return pages.view(-1, *field.shape[1:])
 
@@ -264,11 +272,12 @@ class CacheArena:
         """Return one planned field's view into the arena.
 
         The view is shaped the way the field is addressed. A history field whose
-        planned shape leads with its physical rows-per-page stores an entry
-        per row, so its page axis is folded away and consumers index entries
-        directly; every other field (recurrent state, block-scaled scale
-        planes, V4's byte-shaped planes) is addressed per page and keeps its
-        planned shape. The plan decides which, so no compute view restates
+        planned shape leads with the prefix grain stores an entry per token,
+        so its page axis is folded away and consumers index entries directly.
+        Offloaded fields use their group's physical row grain for this fold.
+        Other fields (recurrent state, compressor state, block-scaled scale
+        planes, V4's byte-shaped planes) retain page-indexed views.
+        The plan decides which, so no compute view restates
         its kernel's geometry, and the dtype likewise comes from the plan.
 
         Args:

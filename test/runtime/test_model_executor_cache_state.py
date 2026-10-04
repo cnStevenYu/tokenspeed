@@ -142,6 +142,7 @@ def test_draft_final_step_follows_the_complete_drafter_run():
     )
     executor.grammar_runtime = None
     executor.drafter = _Drafter()
+    executor.tree_spec = None
     executor.dspark_context_producer = None
     executor.config = SimpleNamespace(spec_algo="EAGLE3", pp_size=1, output_length=4)
     executor.runtime_states = SimpleNamespace(
@@ -241,6 +242,7 @@ def test_non_spec_decode_routes_through_verify():
     executor.attn_backend = CachePoolBinding()
     executor.device_module = SimpleNamespace(current_stream=lambda: None)
     executor.drafter = None
+    executor.tree_spec = None
     executor.config = SimpleNamespace(output_length=1)
     executor.input_buffers = SimpleNamespace(
         input_ids_buf=torch.arange(8, dtype=torch.int32),
@@ -248,7 +250,7 @@ def test_non_spec_decode_routes_through_verify():
     )
     executor.sampling_backend = SimpleNamespace(
         sample=lambda *_a, **_k: calls.append("sample") or (None, None),
-        verify=lambda _lo, _si, cand: calls.append(("verify", tuple(cand.shape)))
+        verify=lambda _lo, _si, cand, tree: calls.append(("verify", tuple(cand.shape)))
         or (
             torch.zeros(cand.shape[0], dtype=torch.int32),
             torch.ones(cand.shape[0], dtype=torch.int32),

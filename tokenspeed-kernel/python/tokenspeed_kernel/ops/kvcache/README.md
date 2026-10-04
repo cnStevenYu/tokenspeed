@@ -19,6 +19,9 @@ metadata pointer in a graph. Model forward graph replay is unchanged.
 
 `offload.py` is the runtime boundary. NVIDIA uses the registered
 `cute_dsl_offload_materialize` implementation and CuTe DSL row helpers.
+The private `_cute_dsl` Python package ships in both wheels and source archives.
+NVIDIA tests check the GPU vendor before importing CuTe; ROCm also exposes
+`torch.cuda`, so GPU availability alone does not identify this backend.
 It accepts physical history IDs (positive int32; zero/negative are invalid),
 request IDs (int32 or scheduler int64), persistent hot tags/LRU and preallocated
 scratch. An invocation resolves the whole request's Q×K selection union.

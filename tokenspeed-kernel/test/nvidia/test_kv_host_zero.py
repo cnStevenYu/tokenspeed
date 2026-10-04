@@ -24,10 +24,13 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from cutlass import cute
-from tokenspeed_kernel.ops.kvcache import zero_byte_ranges
+from utils import is_nvidia
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+if not is_nvidia():
+    pytest.skip("NVIDIA GPU required", allow_module_level=True)
+
+from cutlass import cute  # noqa: E402
+from tokenspeed_kernel.ops.kvcache import zero_byte_ranges  # noqa: E402
 
 
 @pytest.mark.parametrize("extra_ranges", [0, 60])

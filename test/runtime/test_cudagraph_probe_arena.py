@@ -155,7 +155,10 @@ def test_the_probe_arena_does_not_grow_with_max_num_seqs() -> None:
     assert arena_bytes(1) < arena_bytes(512)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="requires an NVIDIA GPU",
+)
 def test_offload_probe_budget_includes_hot_storage(monkeypatch) -> None:
     from test.runtime.test_cache_setup import _mla_config
 

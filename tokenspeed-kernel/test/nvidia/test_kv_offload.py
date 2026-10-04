@@ -24,11 +24,15 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from cutlass import cute
-from tokenspeed_kernel.ops.kvcache import offload
+from utils import is_nvidia
+
+if not is_nvidia():
+    pytest.skip("NVIDIA GPU required", allow_module_level=True)
+
+from cutlass import cute  # noqa: E402
+from tokenspeed_kernel.ops.kvcache import offload  # noqa: E402
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("rid_dtype", [torch.int32, torch.int64])
 def test_dynamic_rows_do_not_compile(rid_dtype):
     host = torch.arange(512 * 16, dtype=torch.int16).reshape(512, 1, 16).pin_memory()

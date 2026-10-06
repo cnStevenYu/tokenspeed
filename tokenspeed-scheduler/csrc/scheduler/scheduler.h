@@ -167,7 +167,7 @@ private:
     PrefillOperation applyEventAndBuildOperation(Request* request, fsm::SchedulePrefillEvent event);
     DecodeOperation applyEventAndBuildOperation(Request* request, fsm::ScheduleDecodeEvent event);
 
-    AdmissionMatch matchPrefixAtAdmission(Request* request, fsm::PrefillSource source);
+    AdmissionMatch matchPrefixAtAdmission(Request* request);
     std::optional<CacheCoordinator::AdmissionResult> admit(ExecutionPlan& plan, AdmissionFeedback& feedback,
                                                            CacheCoordinator::PrefixProbe&& prefix,
                                                            std::span<const GroupDemand> demands,

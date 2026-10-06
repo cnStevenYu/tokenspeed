@@ -211,10 +211,12 @@ DecodeOperation applyDecodeEvent(Request& request, fsm::ScheduleDecodeEvent even
 
 }  // namespace
 
-Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request, fsm::PrefillSource source) {
-    const bool remote_prefill = source == fsm::PrefillSource::kRemote;
-    const auto probe = [this, remote_prefill](std::span<const std::string> hashes) {
-        if (remote_prefill) {
+Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request) {
+    const fsm::PrefillSource source = config_.role == Role::kD && request->Is<fsm::Submitted>()
+                                          ? fsm::PrefillSource::kRemote
+                                          : fsm::PrefillSource::kLocal;
+    const auto probe = [this, source](std::span<const std::string> hashes) {
+        if (source == fsm::PrefillSource::kRemote) {
             return coordinator_.ProbeDecodeDevicePrefix(hashes);
         }
         return coordinator_.ProbePrefix(hashes);
@@ -235,7 +237,8 @@ Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request, fs
     // request's pages would stand in for logits never produced.
     // Remote landing obtains bootstrap and private state from P; D can reuse
     // every complete history block while preserving the per-request probe cap.
-    const std::int32_t replay_tokens = remote_prefill ? 0 : std::max(config_.prefix_replay_tokens, 1);
+    const std::int32_t replay_tokens =
+        source == fsm::PrefillSource::kRemote ? 0 : std::max(config_.prefix_replay_tokens, 1);
     const auto* retracted = request->GetIf<fsm::Retracted>();
     const std::int32_t request_bound = retracted == nullptr
                                            ? request->MaxCachedPrefixTokens()
@@ -244,7 +247,7 @@ Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request, fs
         std::max(std::min(request->PrefillSize() - replay_tokens, request_bound), 0);
     const std::int32_t probe_prefix_pages = max_cacheable_tokens / prefix_granularity;
     const std::int32_t candidate_prefix_pages =
-        std::max((request->PrefillSize() - (remote_prefill ? 0 : 1)) / prefix_granularity, 0);
+        std::max((request->PrefillSize() - (source == fsm::PrefillSource::kRemote ? 0 : 1)) / prefix_granularity, 0);
     std::vector<std::span<const std::int32_t>> prefix_pages = request->FullPrefixPages(false);
     prefix_pages.resize(std::min(prefix_pages.size(), static_cast<std::size_t>(candidate_prefix_pages)));
     std::vector<std::string> hashes = ComputePrefixHashes(prefix_pages, "");
@@ -311,10 +314,10 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
         return std::nullopt;
     }
 
+    AdmissionMatch match = matchPrefixAtAdmission(request);
     const fsm::PrefillSource source = config_.role == Role::kD && request->Is<fsm::Submitted>()
                                           ? fsm::PrefillSource::kRemote
                                           : fsm::PrefillSource::kLocal;
-    AdmissionMatch match = matchPrefixAtAdmission(request, source);
     const std::int32_t prefix_granularity = coordinator_.PrefixGranularity();
     std::int32_t host_prefix_cap = match.probe.host.num_common_tokens;
     registerKvEventPrefixPages(*request, match.candidate_prefix_hashes, 0);

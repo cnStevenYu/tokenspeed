@@ -42,8 +42,10 @@ match the tables. Each retry recomputes the reserve from the cache group's
 declared `block_granularity`, using the same reservation interface as later
 prefill chunks.
 
-**What the probe may claim.** Before the first chunk, `matchPrefixAtAdmission`
-probes the prefix cache for the prompt's leading pages. The probe is bounded
+**What the probe may claim.** Before the first chunk, `schedulePrefillFirstChunk`
+selects the local or remote `PrefillSource` and passes it to `matchPrefixAtAdmission`,
+so matching and first-chunk admission use the same source. The matcher probes
+the prefix cache for the prompt's leading pages. The probe is bounded
 in tokens, and the bound is the minimum of two rules: the configured replay
 tail (local prefill uses `prefix_replay_tokens`, at least the final prompt
 token recomputed for logits; D remote admission has no local replay tail)

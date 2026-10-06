@@ -211,8 +211,8 @@ DecodeOperation applyDecodeEvent(Request& request, fsm::ScheduleDecodeEvent even
 
 }  // namespace
 
-Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request) {
-    const bool remote_prefill = config_.role == Role::kD && !request->Is<fsm::Retracted>();
+Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request, fsm::PrefillSource source) {
+    const bool remote_prefill = source == fsm::PrefillSource::kRemote;
     const auto probe = [this, remote_prefill](std::span<const std::string> hashes) {
         if (remote_prefill) {
             return coordinator_.ProbeDecodeDevicePrefix(hashes);
@@ -311,10 +311,10 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
         return std::nullopt;
     }
 
-    AdmissionMatch match = matchPrefixAtAdmission(request);
     const fsm::PrefillSource source = config_.role == Role::kD && request->Is<fsm::Submitted>()
                                           ? fsm::PrefillSource::kRemote
                                           : fsm::PrefillSource::kLocal;
+    AdmissionMatch match = matchPrefixAtAdmission(request, source);
     const std::int32_t prefix_granularity = coordinator_.PrefixGranularity();
     std::int32_t host_prefix_cap = match.probe.host.num_common_tokens;
     registerKvEventPrefixPages(*request, match.candidate_prefix_hashes, 0);

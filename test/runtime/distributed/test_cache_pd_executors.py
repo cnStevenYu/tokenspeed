@@ -571,7 +571,7 @@ def test_terminal_events_clear_transport_room_state(
     decode.kv_manager = decode_manager
     decode._admissions = {}
     decode._remote_cache_slots = {}
-    decode._remote_cached_tokens = {}
+    decode._remote_cache_usage = {}
     decode._remote_bootstrap_logprobs = {}
     decode._remote_spec_candidate_ids = {}
     decode.cache_layout = _layout()
@@ -581,12 +581,14 @@ def test_terminal_events_clear_transport_room_state(
 
     assert len(decode.generate_events()) == 1
     assert decode.pop_remote_cache_slot("request") == 7
-    assert decode.pop_remote_cached_tokens("request") == max(2, remote_hits)
+    usage = decode.pop_remote_cache_usage("request")
+    assert usage.cached_tokens == max(2, remote_hits)
+    assert usage.decode_prefix_len == 2
     assert decode.pop_remote_bootstrap_logprob("request") == -0.25
     assert decode.pop_remote_spec_candidate_ids("request") == (7, [1])
     assert decode._admissions == {}
     assert decode._remote_cache_slots == {}
-    assert decode._remote_cached_tokens == {}
+    assert decode._remote_cache_usage == {}
     assert decode._remote_bootstrap_logprobs == {}
     assert decode._remote_spec_candidate_ids == {}
     assert decode_manager.cached_tokens_table == {}
@@ -1870,3 +1872,62 @@ def test_every_sharded_prefill_rank_serves_every_decode_rank() -> None:
                 ),
             )
         )
+
+
+def test_full_history_hit_needs_no_dma_but_still_sends_bootstrap_metadata():
+    from tokenspeed.runtime.pd import decode_executor as decode_module
+    from tokenspeed.runtime.pd import prefill_executor as prefill_module
+
+    layout = make_layout(make_group("history", make_segment("layer.0.k")), capacity=8)
+    manifest = make_block_manifest(("history", ()), prefix=4, prompt=4)
+    manager, dma_calls = _recording_transfer_manager(layout, 0x1000)
+    assert (
+        _transfer_cache(
+            manager,
+            "session",
+            0x2000,
+            (),
+            src_block_manifest=manifest,
+            dst_block_manifest=manifest,
+            dst_cache_layout=layout,
+        )
+        == 0
+    )
+    assert dma_calls == []
+
+    op = make_operation(
+        {"history": np.array([[1, 2, 3]], dtype=np.int32)},
+        request_ids=["request-0"],
+        request_pool_indices=[7],
+        extend_prefix_lens=[4],
+        prefill_lengths=[4],
+        num_extends=lambda: 1,
+        decode_input_ids=[42],
+        spec_candidate_ids=[[]],
+        input_lengths=[0],
+    )
+    received = []
+    decode = object.__new__(decode_module.DisaggDecodeExecutor)
+    decode.cache_layout = layout
+    decode.receivers = {
+        "request-0": SimpleNamespace(
+            prefill=lambda *, block_manifest: received.append(block_manifest)
+        )
+    }
+    decode._admissions = {}
+    decode._cache_prefill(op)
+    assert received == [manifest]
+    assert decode._admissions == {"request-0": (7, 4)}
+
+    sent = []
+    prefill = object.__new__(prefill_module.DisaggPrefillExecutor)
+    prefill._layerwise_enabled = False
+    prefill.cache_layout = layout
+    prefill.senders = {"request-0": _RecordingSender(sent)}
+    destination = TransferInfo.from_zmq([b"9", b"session", manifest.to_wire_bytes()])
+    prefill.kv_manager = SimpleNamespace(transfer_infos={9: {"session": destination}})
+    prefill._cache_decode(op)
+    assert len(sent) == 1
+    _, metadata = sent[0]
+    assert metadata["bootstrap_token"] == 42
+    assert metadata["block_manifest"] == manifest

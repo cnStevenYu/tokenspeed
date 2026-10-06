@@ -212,14 +212,15 @@ DecodeOperation applyDecodeEvent(Request& request, fsm::ScheduleDecodeEvent even
 }  // namespace
 
 Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request) {
-    const auto probe = [this, request](std::span<const std::string> hashes) {
-        if (config_.role == Role::kD && !request->Is<fsm::Retracted>()) {
+    const bool remote_prefill = config_.role == Role::kD && !request->Is<fsm::Retracted>();
+    const auto probe = [this, remote_prefill](std::span<const std::string> hashes) {
+        if (remote_prefill) {
             return coordinator_.ProbeDecodeDevicePrefix(hashes);
         }
         return coordinator_.ProbePrefix(hashes);
     };
     const std::int32_t prefix_granularity = coordinator_.PrefixGranularity();
-    // The final prompt token is always recomputed to produce logits. Some
+    // Local prefill recomputes the final prompt token to produce logits. Some
     // consumers additionally require a larger prompt tail (for example, to
     // rebuild request-persistent state that is not stored in the KV cache).
     // Limit the probe itself so excluded hit pages are never claimed: admission
@@ -232,7 +233,9 @@ Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request) {
     // nothing. The probe matches the global cache, not the victim's snapshot,
     // so it may reach no further than that -- a deeper hit on another
     // request's pages would stand in for logits never produced.
-    const std::int32_t replay_tokens = std::max(config_.prefix_replay_tokens, 1);
+    // Remote landing obtains bootstrap and private state from P; D can reuse
+    // every complete history block while preserving the per-request probe cap.
+    const std::int32_t replay_tokens = remote_prefill ? 0 : std::max(config_.prefix_replay_tokens, 1);
     const auto* retracted = request->GetIf<fsm::Retracted>();
     const std::int32_t request_bound = retracted == nullptr
                                            ? request->MaxCachedPrefixTokens()
@@ -240,7 +243,8 @@ Scheduler::AdmissionMatch Scheduler::matchPrefixAtAdmission(Request* request) {
     const std::int32_t max_cacheable_tokens =
         std::max(std::min(request->PrefillSize() - replay_tokens, request_bound), 0);
     const std::int32_t probe_prefix_pages = max_cacheable_tokens / prefix_granularity;
-    const std::int32_t candidate_prefix_pages = std::max((request->PrefillSize() - 1) / prefix_granularity, 0);
+    const std::int32_t candidate_prefix_pages =
+        std::max((request->PrefillSize() - (remote_prefill ? 0 : 1)) / prefix_granularity, 0);
     std::vector<std::span<const std::int32_t>> prefix_pages = request->FullPrefixPages(false);
     prefix_pages.resize(std::min(prefix_pages.size(), static_cast<std::size_t>(candidate_prefix_pages)));
     std::vector<std::string> hashes = ComputePrefixHashes(prefix_pages, "");
@@ -359,9 +363,14 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
         match.extension_hashes.assign(extension_begin, extension_begin + extension_pages);
 
         const std::int32_t unscheduled = request->PrefillSize() - hit_tokens;
-        tokens_this_round = PrefillChunkTokens(coordinator_, hit_tokens, /*resumes_hit=*/true, unscheduled, remaining,
-                                               promotion_boundary_tokens);
-        if (tokens_this_round == 0) {
+        // A remote landing reserves the entire missing suffix. Local replay,
+        // chunk budgets and promotion boundaries govern computation on this
+        // engine; applying them here can leave the PD destination incomplete.
+        tokens_this_round = source == fsm::PrefillSource::kRemote
+                                ? unscheduled
+                                : PrefillChunkTokens(coordinator_, hit_tokens, /*resumes_hit=*/true, unscheduled,
+                                                     remaining, promotion_boundary_tokens);
+        if (tokens_this_round == 0 && source != fsm::PrefillSource::kRemote) {
             return std::nullopt;
         }
         const std::int32_t after_tokens = hit_tokens + tokens_this_round;
@@ -406,7 +415,11 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
                         std::max(0, request->PrefillSize() - *group.sliding_window_tokens + 1);
                     demands[i].extent = SparseSuffix{
                         .extent_tokens = request->PrefillSize(),
-                        .first_block = std::max(hit_tokens / block_granularity, retained_begin / block_granularity),
+                        // Replayable groups have no local hit, even when all
+                        // ordinary history is cached. Receive their whole tail.
+                        .first_block = group.replayable ? retained_begin / block_granularity
+                                                        : std::max(hit_tokens / block_granularity,
+                                                                   retained_begin / block_granularity),
                     };
                 }
             }
@@ -575,10 +588,14 @@ DecodeOperation Scheduler::applyEventAndBuildOperation(Request* request, fsm::Sc
     // it: the D side's first decode (the token crossed the wire with
     // RemotePrefillDoneEvent) and the P side's remote decode (the peer sends
     // it on as the bootstrap token, and the P grammar holds the op until the
-    // result lands). Fused stays -1 on purpose: overlap plans the decode
-    // BEFORE the result lands, and the device fills the input from its
-    // in-flight capture.
-    const bool needs_bootstrap_token = request->Is<fsm::PrefillDone>() && config_.role != Role::kFused;
+    // result lands). Local prefill, including D-role retraction recovery,
+    // stays -1: overlap can plan decode before the prefill result lands.
+    // LastToken() would then overwrite the device's new token with the old
+    // prefill input; an explicit override also discards local draft candidates.
+    const auto* prefill_done = request->GetIf<fsm::PrefillDone>();
+    const bool needs_bootstrap_token =
+        prefill_done != nullptr &&
+        (config_.role == Role::kP || (config_.role == Role::kD && prefill_done->source == fsm::PrefillSource::kRemote));
     const std::int32_t bootstrap_token = needs_bootstrap_token ? request->LastToken() : -1;
     std::vector<std::int32_t> spec_candidate_ids =
         config_.role == Role::kP && needs_bootstrap_token ? request->TakeSpecCandidates() : std::vector<std::int32_t>{};

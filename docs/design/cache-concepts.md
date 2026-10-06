@@ -577,6 +577,19 @@ Its responsibilities:
   pages are reused while final-state groups are restored from the remote
   endpoint snapshot.
 
+  A D-role remote admission may match the complete aligned prompt: P still
+  computes its own logits and supplies the bootstrap token. The remote stream
+  therefore permits zero input tokens; it must still rendezvous and await
+  completion. An empty history manifest skips DMA, never the metadata/status
+  exchange. P and local retraction recovery retain their final-token replay.
+  State groups contribute no local hit or placeholder prefix to the probe;
+  their sparse demand creates the endpoint and preceding null slots. This
+  leaves the endpoint private even when history matches the entire prompt.
+  Replayable groups likewise claim no hit: their full retained tail is
+  allocated and transferred regardless of the history prefix length.
+  The PD manifest accepts `0 <= prefix_len <= prompt_len`, with a positive
+  prompt and aligned prefix. Upgrade both peers together for complete hits.
+
   `Admit` takes two inputs of different scope and tense. One `GroupDemand`
   per group says what that group needs for the round ahead: an extent and a
   reserve beyond it. The extent is one of two shapes in different reference

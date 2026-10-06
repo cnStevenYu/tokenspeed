@@ -18,6 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from dataclasses import dataclass
 
 from tokenspeed_scheduler import PD, Forward
 
@@ -32,6 +33,14 @@ from tokenspeed.runtime.utils import get_colorful_logger
 logger = get_colorful_logger(__name__)
 
 
+@dataclass(frozen=True)
+class RemoteCacheUsage:
+    """Successful landing usage, retaining D's hit independently of P's hit."""
+
+    cached_tokens: int
+    decode_prefix_len: int
+
+
 class DisaggDecodeExecutor:
     def __init__(self, args, kv_args, gloo_group):
         self.cache_layout = kv_args.cache_layout
@@ -41,7 +50,7 @@ class DisaggDecodeExecutor:
         self._local_states = {}
         self._admissions: dict[str, tuple[int, int]] = {}
         self._remote_cache_slots: dict[str, int] = {}
-        self._remote_cached_tokens: dict[str, int] = {}
+        self._remote_cache_usage: dict[str, RemoteCacheUsage] = {}
         self._remote_bootstrap_logprobs: dict[str, float | None] = {}
         self._remote_spec_candidate_ids: dict[str, tuple[int, list[int]]] = {}
 
@@ -152,8 +161,9 @@ class DisaggDecodeExecutor:
                 ) = self.kv_manager.pop_prefill_metadata(bootstrap_room)
                 request_pool_index, local_cached_tokens = self._admissions[req_id]
                 self._remote_cache_slots[req_id] = request_pool_index
-                self._remote_cached_tokens[req_id] = max(
-                    local_cached_tokens, cached_tokens
+                self._remote_cache_usage[req_id] = RemoteCacheUsage(
+                    cached_tokens=max(local_cached_tokens, cached_tokens),
+                    decode_prefix_len=local_cached_tokens,
                 )
                 self._remote_bootstrap_logprobs[req_id] = bootstrap_logprob
                 if spec_candidate_ids is not None:
@@ -187,8 +197,8 @@ class DisaggDecodeExecutor:
     def pop_remote_spec_candidate_ids(self, request_id: str):
         return self._remote_spec_candidate_ids.pop(request_id, None)
 
-    def pop_remote_cached_tokens(self, request_id: str) -> int:
-        return self._remote_cached_tokens.pop(request_id)
+    def pop_remote_cache_usage(self, request_id: str) -> RemoteCacheUsage:
+        return self._remote_cache_usage.pop(request_id)
 
     def pop_remote_bootstrap_logprob(self, request_id: str) -> float | None:
         """The prefill node's logprob of the bootstrap token, None if it sent none."""

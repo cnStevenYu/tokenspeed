@@ -476,24 +476,11 @@ CacheCoordinator::PrefixProbe CacheCoordinator::ProbeDecodeDevicePrefix(
 
     PrefixProbe out;
     out.group_keys = buildGroupKeys(content_hashes);
-    const auto probe_device = [&](std::int32_t floor_tokens) {
-        PrefixProbe::Tier tier =
-            probeTierWithKeys<CacheTier::kDevice>(out.group_keys, history_match_order, num_prefix_pages, floor_tokens);
-        const std::int64_t covered_tokens =
-            static_cast<std::int64_t>(tier.num_common_tokens) - static_cast<std::int64_t>(floor_tokens);
-        _assert(covered_tokens >= 0, "decode destination state coverage is negative");
-        for (std::size_t i = 0; i < groups_.size(); ++i) {
-            if (groups_[i].Spec().kind == AttnKind::kMambaState) {
-                const std::int64_t num_holes = covered_tokens / geometry_[i].BlockGranularity();
-                _assert(num_holes <= static_cast<std::int64_t>(out.group_keys[i].size()),
-                        "decode destination state hole count is outside the probed range");
-                const std::size_t hole_count = static_cast<std::size_t>(num_holes);
-                tier.per_group[i].hits.resize(hole_count);
-            }
-        }
-        return tier;
-    };
-    out.device = probe_device(/*floor_tokens=*/0);
+    // State groups have no local hit. Leave their probe empty: the remote
+    // demand materializes the endpoint and its leading holes. Padding a state
+    // probe to a full history hit would overlap that private endpoint slot.
+    out.device = probeTierWithKeys<CacheTier::kDevice>(out.group_keys, history_match_order, num_prefix_pages,
+                                                       /*floor_tokens=*/0);
     return out;
 }
 

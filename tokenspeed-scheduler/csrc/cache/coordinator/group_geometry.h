@@ -112,9 +112,9 @@ public:
 private:
     std::int32_t sparseSuffixBlocks(const BlockTable& table, const SparseSuffix& sparse,
                                     std::int32_t reserve_tokens) const {
-        // Decode-side prefix acquisition may have already installed aligned
-        // null holes for state. They carry no ownership and remain safe to
-        // extend sparsely up to the remote endpoint snapshot.
+        // Sparse placement creates the leading null holes itself. In
+        // particular, a remote state endpoint remains private even when
+        // the ordinary history prefix covers the complete prompt.
         _assert(table.AvailableTokens() == 0, "sparse suffix materialization requires a page boundary");
         _assert(table.NumBlocks() <= sparse.first_block, "sparse suffix overlaps the existing block table");
         _assert(sparse.extent_tokens > 0 && reserve_tokens >= 0,

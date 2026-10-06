@@ -915,7 +915,8 @@ TEST_F(PdSparseDecodeAdmissionTestSuite, ReusesHistoryPrefixAndLeavesStatePrefix
     const ExecutionPlan plan = PlanOnce();
     const ForwardBatch* destination = FindRemoteAdmission(plan);
     ASSERT_NE(destination, nullptr);
-    EXPECT_EQ(destination->input_lengths, (std::vector<std::int32_t>{2}));
+    EXPECT_EQ(destination->input_lengths, (std::vector<std::int32_t>{0}));
+    EXPECT_EQ(destination->extend_prefix_lens, (std::vector<std::int32_t>{8}));
 
     const auto& full = destination->block_tables.at("full").at(0);
     ASSERT_EQ(full.size(), 5u);
@@ -1008,6 +1009,213 @@ TEST_F(PdSparseDecodeNoPrefixCacheTestSuite, RemoteBootstrapConsumesSparseTailBe
     const auto& state = boundary->block_tables.at("state").at(0);
     ASSERT_EQ(state.size(), 6u);
     EXPECT_GT(state.back(), 0);
+}
+
+// PD cache identity is computed KV, not the allocated destination or sampled
+// bootstrap token. Exercise the public scheduler events used by the runtime.
+class PdDecodePrefixTestSuite : public DisaggDecodeAdmissionTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = DisaggDecodeAdmissionTestSuite::MakeConfig();
+        cfg.device_allocator.total_pages = 128;
+        cfg.cache_groups.front().total_pages = 128;
+        cfg.disable_prefix_cache = false;
+        cfg.disable_l2_cache = true;
+        cfg.max_batch_size = 4;
+        cfg.overlap_schedule_depth = 0;
+        return cfg;
+    }
+
+    ExecutionPlan AdmitPrompt(const std::string& id, std::vector<std::int32_t> tokens) {
+        Submit(RequestSpec{.request_id = id, .tokens = std::move(tokens)});
+        SendBootstrapped(id);
+        return PlanOnce();
+    }
+
+    void FinishLanding(const std::string& id, std::int32_t token) {
+        SendRemotePrefillDone(id, token);
+        SendFinish(id);
+        PlanOnce();
+    }
+};
+
+TEST_F(PdDecodePrefixTestSuite, WholePromptHitStillWaitsForBootstrapAndReservesDecode) {
+    const auto cold = AdmitPrompt("seed", {1, 2, 3, 4});
+    ASSERT_NE(FindRemoteAdmission(cold), nullptr);
+    const auto seed_blocks = FindRemoteAdmission(cold)->block_tables.at("full").at(0);
+    FinishLanding("seed", 42);
+
+    const auto warm = AdmitPrompt("warm", {1, 2, 3, 4});
+    const auto* landing = FindRemoteAdmission(warm);
+    ASSERT_NE(landing, nullptr);
+    EXPECT_EQ(landing->extend_prefix_lens, (std::vector<std::int32_t>{4}));
+    EXPECT_EQ(landing->input_lengths, (std::vector<std::int32_t>{0}));
+    EXPECT_TRUE(landing->input_ids.empty());
+    const auto& blocks = landing->block_tables.at("full").at(0);
+    ASSERT_EQ(blocks.size(), 3u);
+    EXPECT_EQ(blocks[0], seed_blocks[0]);
+    EXPECT_EQ(blocks[1], seed_blocks[1]);
+    EXPECT_GT(blocks[2], 0);
+    const auto waiting = PlanOnce();
+    const auto* idle = FindForwardBatch(waiting.Operations());
+    EXPECT_TRUE(idle == nullptr || idle->request_ids.empty());
+
+    SendRemotePrefillDone("warm", 43);
+    const auto decoded = PlanOnce();
+    const auto* forward = FindForwardBatch(decoded.Operations());
+    ASSERT_NE(forward, nullptr);
+    EXPECT_TRUE(forward->extend_prefix_lens.empty());
+    EXPECT_EQ(forward->decode_input_ids, (std::vector<std::int32_t>{43}));
+    SendForwardDone("warm", {44});
+    SendFinish("warm");
+}
+
+TEST_F(PdDecodePrefixTestSuite, RemotePromptHitPreservesPerRequestProbeCap) {
+    AdmitPrompt("seed", {1, 2, 3, 4});
+    FinishLanding("seed", 42);
+
+    Submit(RequestSpec{.request_id = "capped", .tokens = {1, 2, 3, 4}, .max_cached_prefix_tokens = 2});
+    SendBootstrapped("capped");
+    const auto plan = PlanOnce();
+    const auto* landing = FindRemoteAdmission(plan);
+    ASSERT_NE(landing, nullptr);
+    EXPECT_EQ(landing->extend_prefix_lens, (std::vector<std::int32_t>{2}));
+    EXPECT_EQ(landing->input_lengths, (std::vector<std::int32_t>{2}));
+}
+
+TEST_F(PdDecodePrefixTestSuite, SingleOutputFinishNeverPublishesBootstrapToken) {
+    for (std::int32_t length : {1, 3, 4}) {
+        const std::int32_t start = 100 * length;
+        const auto prompt = MakeTokens(length, start);
+        const auto cold = AdmitPrompt("seed", prompt);
+        ASSERT_NE(FindRemoteAdmission(cold), nullptr);
+        FinishLanding("seed", 9000);
+        auto continuation = prompt;
+        continuation.insert(continuation.end(), {9000, 9001});
+        const auto retry = AdmitPrompt("retry", continuation);
+        const auto* landing = FindRemoteAdmission(retry);
+        ASSERT_NE(landing, nullptr);
+        EXPECT_EQ(landing->extend_prefix_lens.at(0), length / 2 * 2);
+        ExecutionEvent failed;
+        failed.With(pd::FailedEvent{"retry"});
+        scheduler_->Advance(std::move(failed));
+        PlanOnce();
+    }
+}
+
+TEST_F(PdDecodePrefixTestSuite, FailedTransferPreservesOnlyPreviouslyPublishedPrefix) {
+    AdmitPrompt("seed", {1, 2, 3, 4});
+    FinishLanding("seed", 42);
+    const auto failed_admission = AdmitPrompt("failed", {1, 2, 3, 4, 5, 6, 7, 8});
+    ASSERT_NE(FindRemoteAdmission(failed_admission), nullptr);
+    ASSERT_EQ(FindRemoteAdmission(failed_admission)->extend_prefix_lens.at(0), 4);
+    ExecutionEvent failed;
+    failed.With(pd::FailedEvent{"failed"});
+    scheduler_->Advance(std::move(failed));
+    const auto retry = AdmitPrompt("retry", {1, 2, 3, 4, 5, 6, 7, 8});
+    ASSERT_NE(FindRemoteAdmission(retry), nullptr);
+    EXPECT_EQ(FindRemoteAdmission(retry)->extend_prefix_lens.at(0), 4);
+}
+
+TEST_F(PdDecodePrefixTestSuite, FailedColdTransferPublishesNothing) {
+    AdmitPrompt("failed", {1, 2, 3, 4});
+    ExecutionEvent failed;
+    failed.With(pd::FailedEvent{"failed"});
+    scheduler_->Advance(std::move(failed));
+    const auto retry = AdmitPrompt("retry", {1, 2, 3, 4});
+    ASSERT_NE(FindRemoteAdmission(retry), nullptr);
+    EXPECT_EQ(FindRemoteAdmission(retry)->extend_prefix_lens.at(0), 0);
+}
+
+TEST_F(PdDecodePrefixTestSuite, RetractionUsesLocalRecoveryAndExcludesUncomputedToken) {
+    AdmitPrompt("request", {1, 2, 3});
+    SendRemotePrefillDone("request", 42);
+    PlanOnce();  // first decode publishes only the completed prompt block
+    SendForwardDone("request", {43});
+    PlanOnce();  // publish the completed block {3, 42}
+    SendForwardDone("request", {44});
+    ExecutionEvent retract;
+    retract.With(forward::Retract{.request_id = "request"});
+    scheduler_->Advance(std::move(retract));
+    const auto recovery = PlanOnce();
+    EXPECT_EQ(FindRemoteAdmission(recovery), nullptr);
+    const auto* local = FindForwardBatch(recovery.Operations());
+    ASSERT_NE(local, nullptr);
+    EXPECT_EQ(local->extend_prefix_lens, (std::vector<std::int32_t>{4}));
+    EXPECT_EQ(local->input_ids, (std::vector<std::int32_t>{43, 44}));
+}
+
+TEST_F(PdDecodePrefixTestSuite, RecoveryDecodeKeepsDeviceInputForEitherResultTiming) {
+    for (bool result_landed : {false, true}) {
+        const std::string id = result_landed ? "landed" : "in-flight";
+        AdmitPrompt(id, {1, 2, 3});
+        SendRemotePrefillDone(id, 42);
+        const auto first_decode = PlanOnce();
+        ASSERT_NE(FindForwardBatch(first_decode.Operations()), nullptr);
+        EXPECT_EQ(FindForwardBatch(first_decode.Operations())->decode_input_ids, (std::vector<std::int32_t>{42}));
+        SendForwardDone(id, {43});
+        PlanOnce();
+        SendForwardDone(id, {44});
+        ExecutionEvent retract;
+        retract.With(forward::Retract{.request_id = id});
+        scheduler_->Advance(std::move(retract));
+        const auto recovery = PlanOnce();
+        const auto* local = FindForwardBatch(recovery.Operations());
+        ASSERT_NE(local, nullptr);
+        ASSERT_EQ(local->NumExtends(), 1u);
+        ASSERT_EQ(local->input_ids.back(), 44);
+        if (result_landed) {
+            SendForwardDone(id, {45});
+        }
+        // Overlap may build this before the local prefill's result arrives.
+        // The device already owns its next token (and any draft candidates).
+        const auto resumed = PlanOnce();
+        const auto* decode = FindForwardBatch(resumed.Operations());
+        ASSERT_NE(decode, nullptr);
+        EXPECT_EQ(decode->NumExtends(), 0u);
+        EXPECT_EQ(decode->decode_input_ids, (std::vector<std::int32_t>{-1}))
+            << "local recovery must not override device input; result_landed=" << result_landed;
+        if (!result_landed) {
+            SendForwardDone(id, {45});
+        }
+        SendForwardDone(id, {46});
+        SendFinish(id);
+        PlanOnce();
+    }
+}
+
+class PdReplayablePrefixTestSuite : public PdDecodePrefixTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = PdDecodePrefixTestSuite::MakeConfig();
+        cfg.max_scheduled_tokens = 64;
+        cfg.prefix_granularity = 8;
+        cfg.cache_groups.front().block_granularity = 8;
+        auto replay = cfg.cache_groups.front();
+        replay.group_id = "replay";
+        replay.block_granularity = 4;
+        replay.retention = CacheGroupConfig::Retention::SlidingWindow;
+        replay.sliding_window_tokens = 16;
+        replay.replayable = true;
+        cfg.cache_groups.push_back(replay);
+        return cfg;
+    }
+};
+
+TEST_F(PdReplayablePrefixTestSuite, LocalHistoryHitStillAllocatesEntireRemoteReplayTail) {
+    AdmitPrompt("seed", MakeTokens(32, 1));
+    FinishLanding("seed", 42);
+    const auto warm = AdmitPrompt("warm", MakeTokens(40, 1));
+    const auto* landing = FindRemoteAdmission(warm);
+    ASSERT_NE(landing, nullptr);
+    EXPECT_EQ(landing->extend_prefix_lens.at(0), 32);
+    EXPECT_EQ(landing->input_lengths.at(0), 8);
+    EXPECT_EQ(landing->extend_replay_lens.at(0), 0);
+    const auto& replay = landing->block_tables.at("replay").at(0);
+    ASSERT_GE(replay.size(), 10u);
+    for (int slot = 6; slot < 10; ++slot) {
+        EXPECT_GT(replay[slot], 0) << "remote tail [25,40) must exist, including before hit 32";
+    }
 }
 
 }  // namespace tokenspeed::test

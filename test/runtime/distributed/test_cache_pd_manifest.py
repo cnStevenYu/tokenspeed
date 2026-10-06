@@ -493,6 +493,7 @@ def test_logical_slots_accepts_block_granularity() -> None:
         block_granularity=4,
         retention="full_history",
         sliding_window_tokens=None,
+        replayable=False,
     ) == (1, 2, 3)
 
 
@@ -866,4 +867,59 @@ def test_cache_readiness_rejects_missing_resident_fields():
     with pytest.raises(ValueError, match="every resident field"):
         build_cache_fields_by_producer_step(
             plan, producer_fields_by_step=(("layer.0.kv",),)
+        )
+
+
+def test_full_prompt_hit_keeps_endpoint_state_but_sends_no_history():
+    manifest = build_cache_block_manifest(
+        _op(), layout=_layout(), request_row=0, prefix_len=16, prompt_len=16
+    )
+    assert manifest.groups == (
+        CachePDGroupBlocks("attention", ()),
+        CachePDGroupBlocks("linear-a", (14,)),
+        CachePDGroupBlocks("linear-b", (24,)),
+    )
+    validate_cache_manifest(manifest, layout=_layout(), peer="decode")
+    assert CachePDBlockManifest.from_wire_bytes(manifest.to_wire_bytes()) == manifest
+
+
+@pytest.mark.parametrize("prefix", [12, 16])
+def test_replayable_tail_is_transferred_even_before_history_hit(prefix):
+    from tokenspeed.runtime.pd.cache_protocol import (
+        build_cache_layerwise_block_selection,
+    )
+
+    spec = replace(
+        _group_spec("replay", "history", "full_suffix"),
+        retention="sliding_window",
+        sliding_window_tokens=8,
+        replayable=True,
+    )
+    layout = _contract((spec,), (_field("replay", "layer.0.k"),))
+    operation = SimpleNamespace(
+        block_tables_arrays=lambda: {"replay": np.array([[0, 0, 3, 4]], dtype=np.int32)}
+    )
+    manifest = build_cache_block_manifest(
+        operation, layout=layout, request_row=0, prefix_len=prefix, prompt_len=16
+    )
+    assert manifest.groups == (CachePDGroupBlocks("replay", (3, 4)),)
+    validate_cache_manifest(manifest, layout=layout, peer="decode")
+    selection = build_cache_layerwise_block_selection(
+        operation,
+        layout=layout,
+        request_row=0,
+        prefix_len=prefix,
+        prompt_len=16,
+        chunk_start=8,
+        chunk_end=16,
+    )
+    assert selection.groups[0].source_block_ids == (3, 4)
+    assert selection.groups[0].destination_positions == (0, 1)
+
+
+@pytest.mark.parametrize("prefix,prompt", [(-4, 8), (0, 0), (12, 8)])
+def test_manifest_rejects_invalid_prefix_range(prefix, prompt):
+    with pytest.raises(CacheContractError, match="requires 0 <="):
+        build_cache_block_manifest(
+            _op(), layout=_layout(), request_row=0, prefix_len=prefix, prompt_len=prompt
         )

@@ -688,7 +688,7 @@ def test_pd_one_token_request_finishes_at_remote_prefill_done():
     state.sampling_params.max_new_tokens = 1
     processor.rid_to_state["decode"] = state
 
-    processor.on_remote_prefill_done("decode", 101, 2, None)
+    processor.on_remote_prefill_done("decode", 101, 2, None, decode_prefix_len=2)
     events = processor.finish_remote_prefill_only_request("decode")
 
     assert state.output_ids == [101]
@@ -702,6 +702,7 @@ def test_pd_one_token_request_finishes_at_remote_prefill_done():
     assert output.output_ids == [[101]]
     assert output.completion_tokens == [1]
     assert output.cached_tokens == [2]
+    assert output.output_extra_infos == [{"decode_prefix_len": 2}]
     assert output.finished_reasons[0] == {"type": "length", "length": 1}
 
 
@@ -727,7 +728,7 @@ def test_pd_decode_matcher_accepts_the_prefill_nodes_token():
     state.grammar = _Matcher()
     processor.rid_to_state["decode"] = state
 
-    processor.on_remote_prefill_done("decode", 101, 2, None)
+    processor.on_remote_prefill_done("decode", 101, 2, None, decode_prefix_len=2)
 
     assert state.output_ids == [101]
     assert state.grammar.accepted == [101]
@@ -741,7 +742,7 @@ def test_pd_decode_drops_the_grammar_when_the_bootstrap_token_is_lost():
     state.grammar = _Matcher()
     processor.rid_to_state["decode"] = state
 
-    processor.on_remote_prefill_done("decode", -1, 2, None)
+    processor.on_remote_prefill_done("decode", -1, 2, None, decode_prefix_len=2)
 
     assert state.output_ids == []
     assert state.grammar is None
@@ -754,7 +755,7 @@ def test_pd_multi_token_request_continues_after_remote_prefill_done():
     state.sampling_params.max_new_tokens = 2
     processor.rid_to_state["decode"] = state
 
-    processor.on_remote_prefill_done("decode", 101, 2, None)
+    processor.on_remote_prefill_done("decode", 101, 2, None, decode_prefix_len=2)
     events = processor.finish_remote_prefill_only_request("decode")
 
     assert state.output_ids == [101]
@@ -810,8 +811,11 @@ def test_remote_prefill_usage_merges_overlapping_prefixes(
     state = _state(list(range(2048)), computed_length=2048)
     state.cached_tokens = local_hits
     processor.rid_to_state["decode"] = state
-    processor.on_remote_prefill_done("decode", 101, remote_hits, None)
+    processor.on_remote_prefill_done(
+        "decode", 101, remote_hits, None, decode_prefix_len=local_hits
+    )
     assert state.cached_tokens == expected
+    assert state.prefix_len == local_hits
 
 
 def test_non_pd_cached_tokens_reach_output():

@@ -1072,6 +1072,8 @@ class OutputProcesser:
         bootstrap_token: int,
         cached_tokens: int,
         bootstrap_logprob: float | None,
+        *,
+        decode_prefix_len: int,
     ) -> None:
         """Record the bootstrap token on a decode-node request (RemotePrefillDoneEvent).
 
@@ -1098,6 +1100,9 @@ class OutputProcesser:
         state = self.rid_to_state[req_id]
         # P and D reuse overlapping leading prefixes; never sum their hits.
         state.cached_tokens = max(state.cached_tokens, cached_tokens)
+        # Keep D's actual reuse separate from the overlapping P/D usage total.
+        # Local retraction recovery must not rewrite this PD admission fact.
+        state.prefix_len = decode_prefix_len
         if bootstrap_token == -1:
             logger.warning(
                 f"[on_remote_prefill_done] rid={req_id!s} received bootstrap_token=-1, "

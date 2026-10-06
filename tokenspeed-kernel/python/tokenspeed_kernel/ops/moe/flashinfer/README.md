@@ -17,7 +17,9 @@ buffer is needed.
 `thirdparty/flashinfer/trtllm_moe.py` builds a source-keyed private JIT module.
 The adapter ships as a Python package in both source distributions and wheels;
 it does not require a source checkout on `PYTHONPATH`.
-It adds a checked `cudaMemsetAsync` after the named map allocation and retains
+It adds a checked fill-kernel launch after the named map allocation; the kernel
+waits on and releases programmatic dependents, so the routing chain keeps PDL
+where a memset graph node would cost about 4 us per MoE layer. It retains
 FlashInfer's routing and GEMM implementations and Python API signatures. The
 small-batch tactic policy below narrows the tuner's candidates for one model.
 The installed package and stock JIT modules are unchanged. The first warmup
@@ -80,3 +82,18 @@ The SwiGLU recipe folds the up-half dequant into the second scale, which would
 be wrong here. The kernel test checks non-unit input scales against a
 dequantized reference, and checks in-kernel sigmoid-plus-bias routing with 512
 experts and top-22.
+
+## Unquantized CUTLASS MoE workspace
+
+`flashinfer_cutlass_unquant_moe_apply` hands `cutlass_fused_moe` one
+persistent scratch buffer per device (`cutlass_unquant_moe_workspace`),
+sized through `cutlass_fused_moe_workspace_size`, zero-filled when it is
+allocated or grown, and reused across layers and calls. Left to allocate its
+own scratch per call, the SM90 chain read bytes it never wrote: for some
+(EP rank, routing) combinations the rank's routed output was NaN for finite
+inputs, reproducibly for that call, while the identical call with any
+caller-provided buffer matched the fp32 reference. Consecutive MoE layers are
+stream-ordered through their activations, so one buffer per device is never
+in use by two calls at once; a model that overlapped two MoE calls on
+separate streams would need one buffer per stream. PDL stays off in this
+chain for the race described in `cutlass_unquant.py`.

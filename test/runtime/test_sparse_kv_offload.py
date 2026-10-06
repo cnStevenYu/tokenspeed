@@ -395,6 +395,7 @@ def test_attention_output_is_bitwise_after_relocation(queries):
             qk_rope_head_dim=64,
             softmax_scale=192**-0.5,
             page_size=64,
+            slot_order="selection",
             q_len_per_req=queries,
             solution="triton",
         )

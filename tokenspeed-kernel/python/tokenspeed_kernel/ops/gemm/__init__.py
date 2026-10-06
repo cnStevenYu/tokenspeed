@@ -29,6 +29,7 @@ from math import prod
 # Backend registration (side-effect imports)
 import tokenspeed_kernel.numerics.reference.gemm  # noqa: F401
 import tokenspeed_kernel.ops.gemm.cuda  # noqa: F401
+import tokenspeed_kernel.ops.gemm.cute_dsl  # noqa: F401
 import tokenspeed_kernel.ops.gemm.flashinfer  # noqa: F401
 import tokenspeed_kernel.ops.gemm.gluon  # noqa: F401
 import tokenspeed_kernel.ops.gemm.ll_bf16  # noqa: F401
@@ -953,6 +954,7 @@ _KERNELS_WITH_FUSED_BIAS: frozenset[str] = frozenset(
 _KERNELS_WITH_PDL: frozenset[str] = frozenset(
     {
         "deep_gemm_mm_fp8_blockscale",
+        "flashinfer_cute_dsl_mm_nvfp4",
         "flashinfer_cute_dsl_mm_nvfp4_a16",
         "flashinfer_mm_nvfp4",
     }

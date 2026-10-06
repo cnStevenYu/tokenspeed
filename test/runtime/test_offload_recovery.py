@@ -169,6 +169,7 @@ def test_recovery_chunks_commit_all_rows_and_resume_decode_bitwise(queries, solu
                 softmax_scale=192**-0.5,
                 page_size=64,
                 solution=solution,
+                slot_order="selection",
             )
 
         expected = attend(baseline, selected, slice(None), q, positions)

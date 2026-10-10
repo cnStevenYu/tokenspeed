@@ -168,9 +168,10 @@ private:
 
 struct PrefillDone {
     PrefillDone(ForwardResources resources, TokenContainer::Window window,
-                std::int32_t reserve_num_tokens_in_next_schedule_event)
+                std::int32_t reserve_num_tokens_in_next_schedule_event, PrefillSource source)
         : resources{std::move(resources)},
           window{window},
+          source{source},
           reserve_num_tokens_in_next_schedule_event_{reserve_num_tokens_in_next_schedule_event} {}
 
     PrefillInfo CurrentPrefillInfo() const { return MakePrefillInfo(resources, window); }
@@ -179,6 +180,9 @@ struct PrefillDone {
 
     ForwardResources resources;
     TokenContainer::Window window{};
+    // A remote landing needs an explicit bootstrap token. Local prefill,
+    // including D-role recovery, leaves the next input on the device.
+    PrefillSource source;
 
 private:
     std::int32_t reserve_num_tokens_in_next_schedule_event_{};

@@ -235,7 +235,8 @@ struct ExtendResultEvent : InvalidTransitionHandler<ExtendResultEvent> {
         state.ExtendResultTokens(result_tokens_);
         // Older intermediate chunk results may still be landing on these
         // pages (see above): the bundle, in-flight count included, moves on.
-        return PrefillDone{std::move(state.resources), state.window, state.ReserveNumTokensInNextScheduleEvent()};
+        return PrefillDone{std::move(state.resources), state.window, state.ReserveNumTokensInNextScheduleEvent(),
+                           PrefillSource::kLocal};
     }
 
     // An intermediate chunk produces no token -- its result is KV written

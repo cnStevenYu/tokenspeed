@@ -1161,4 +1161,89 @@ TEST_F(PdDecodePrefixTestSuite, FailedColdTransferPublishesNothing) {
     EXPECT_EQ(FindRemoteAdmission(retry)->extend_prefix_lens.at(0), 0);
 }
 
+// PD cache identity is computed KV, not the allocated destination or sampled
+// bootstrap token. Exercise the public scheduler events used by the runtime.
+class PdDecodeRecoveryTestSuite : public DisaggDecodeAdmissionTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = DisaggDecodeAdmissionTestSuite::MakeConfig();
+        cfg.device_allocator.total_pages = 128;
+        cfg.cache_groups.front().total_pages = 128;
+        cfg.disable_prefix_cache = false;
+        cfg.disable_l2_cache = true;
+        cfg.max_batch_size = 4;
+        cfg.overlap_schedule_depth = 0;
+        return cfg;
+    }
+
+    ExecutionPlan AdmitPrompt(const std::string& id, std::vector<std::int32_t> tokens) {
+        Submit(RequestSpec{.request_id = id, .tokens = std::move(tokens)});
+        SendBootstrapped(id);
+        return PlanOnce();
+    }
+
+    void FinishLanding(const std::string& id, std::int32_t token) {
+        SendRemotePrefillDone(id, token);
+        SendFinish(id);
+        PlanOnce();
+    }
+};
+
+TEST_F(PdDecodeRecoveryTestSuite, RetractionUsesLocalRecoveryAndExcludesUncomputedToken) {
+    AdmitPrompt("request", {1, 2, 3});
+    SendRemotePrefillDone("request", 42);
+    PlanOnce();  // first decode publishes only the completed prompt block
+    SendForwardDone("request", {43});
+    PlanOnce();  // publish the completed block {3, 42}
+    SendForwardDone("request", {44});
+    ExecutionEvent retract;
+    retract.With(forward::Retract{.request_id = "request"});
+    scheduler_->Advance(std::move(retract));
+    const auto recovery = PlanOnce();
+    EXPECT_EQ(FindRemoteAdmission(recovery), nullptr);
+    const auto* local = FindForwardBatch(recovery.Operations());
+    ASSERT_NE(local, nullptr);
+    EXPECT_EQ(local->extend_prefix_lens, (std::vector<std::int32_t>{4}));
+    EXPECT_EQ(local->input_ids, (std::vector<std::int32_t>{43, 44}));
+}
+
+TEST_F(PdDecodeRecoveryTestSuite, RecoveryDecodeKeepsDeviceInputForEitherResultTiming) {
+    for (bool result_landed : {false, true}) {
+        const std::string id = result_landed ? "landed" : "in-flight";
+        AdmitPrompt(id, {1, 2, 3});
+        SendRemotePrefillDone(id, 42);
+        const auto first_decode = PlanOnce();
+        ASSERT_NE(FindForwardBatch(first_decode.Operations()), nullptr);
+        EXPECT_EQ(FindForwardBatch(first_decode.Operations())->decode_input_ids, (std::vector<std::int32_t>{42}));
+        SendForwardDone(id, {43});
+        PlanOnce();
+        SendForwardDone(id, {44});
+        ExecutionEvent retract;
+        retract.With(forward::Retract{.request_id = id});
+        scheduler_->Advance(std::move(retract));
+        const auto recovery = PlanOnce();
+        const auto* local = FindForwardBatch(recovery.Operations());
+        ASSERT_NE(local, nullptr);
+        ASSERT_EQ(local->NumExtends(), 1u);
+        ASSERT_EQ(local->input_ids.back(), 44);
+        if (result_landed) {
+            SendForwardDone(id, {45});
+        }
+        // Overlap may build this before the local prefill's result arrives.
+        // The device already owns its next token (and any draft candidates).
+        const auto resumed = PlanOnce();
+        const auto* decode = FindForwardBatch(resumed.Operations());
+        ASSERT_NE(decode, nullptr);
+        EXPECT_EQ(decode->NumExtends(), 0u);
+        EXPECT_EQ(decode->decode_input_ids, (std::vector<std::int32_t>{-1}))
+            << "local recovery must not override device input; result_landed=" << result_landed;
+        if (!result_landed) {
+            SendForwardDone(id, {45});
+        }
+        SendForwardDone(id, {46});
+        SendFinish(id);
+        PlanOnce();
+    }
+}
+
 }  // namespace tokenspeed::test

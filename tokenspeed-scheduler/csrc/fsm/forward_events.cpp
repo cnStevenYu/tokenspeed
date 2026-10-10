@@ -61,7 +61,8 @@ SchedulePrefillFirstChunkEvent::scheduleFirstChunk(TokenContainer* token_contain
         if (awaits_result_) {
             return PrefillAwaitingResult{std::move(resources), window, reserve_num_tokens_in_next_schedule_event_};
         }
-        return PrefillDone{std::move(resources), window, reserve_num_tokens_in_next_schedule_event_};
+        return PrefillDone{std::move(resources), window, reserve_num_tokens_in_next_schedule_event_,
+                           PrefillSource::kLocal};
     }
     return Prefilling{std::move(resources), window, reserve_num_tokens_in_next_schedule_event_};
 }
@@ -86,7 +87,8 @@ std::variant<PrefillDone, PrefillAwaitingResult, Prefilling> SchedulePrefillEven
             return PrefillAwaitingResult{std::move(state.resources), window,
                                          reserve_num_tokens_in_next_schedule_event_};
         }
-        return PrefillDone{std::move(state.resources), window, reserve_num_tokens_in_next_schedule_event_};
+        return PrefillDone{std::move(state.resources), window, reserve_num_tokens_in_next_schedule_event_,
+                           PrefillSource::kLocal};
     }
     return Prefilling{std::move(state.resources), window, reserve_num_tokens_in_next_schedule_event_};
 }

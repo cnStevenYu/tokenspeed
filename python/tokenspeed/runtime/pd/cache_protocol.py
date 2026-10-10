@@ -369,9 +369,12 @@ def _logical_slots(
     block_granularity: int,
     retention: Retention,
     sliding_window_tokens: int | None,
+    replayable: bool,
 ) -> tuple[int, ...]:
     if policy == "full_suffix":
-        begin = prefix_len // block_granularity
+        # Replayable history is never shared by D; the retained tail must land
+        # even when ordinary history hits the complete prompt.
+        begin = 0 if replayable else prefix_len // block_granularity
         if retention == "sliding_window":
             # The next decode token can attend the preceding window - 1 raw
             # tokens. Include every group block intersecting that retained tail.
@@ -467,6 +470,7 @@ def validate_cache_manifest(
             spec.block_granularity,
             spec.retention,
             spec.sliding_window_tokens,
+            spec.replayable,
         )
         if len(group.block_ids) != len(required):
             raise CacheContractError(
@@ -514,6 +518,7 @@ def build_cache_block_manifest(
             spec.block_granularity,
             spec.retention,
             spec.sliding_window_tokens,
+            spec.replayable,
         )
         if logical_slots and logical_slots[-1] >= table.shape[1]:
             raise CacheContractError(
@@ -589,6 +594,7 @@ def build_cache_layerwise_block_selection(
             block_granularity,
             spec.retention,
             spec.sliding_window_tokens,
+            spec.replayable,
         )
         if spec.transfer_policy == "full_suffix":
             group_start_position = (

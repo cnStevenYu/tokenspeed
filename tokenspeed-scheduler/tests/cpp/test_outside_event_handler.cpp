@@ -1010,4 +1010,66 @@ TEST_F(PdSparseDecodeNoPrefixCacheTestSuite, RemoteBootstrapConsumesSparseTailBe
     EXPECT_GT(state.back(), 0);
 }
 
+// PD cache identity is computed KV, not the allocated destination or sampled
+// bootstrap token. Exercise the public scheduler events used by the runtime.
+class PdDecodePrefixTestSuite : public DisaggDecodeAdmissionTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = DisaggDecodeAdmissionTestSuite::MakeConfig();
+        cfg.device_allocator.total_pages = 128;
+        cfg.cache_groups.front().total_pages = 128;
+        cfg.disable_prefix_cache = false;
+        cfg.disable_l2_cache = true;
+        cfg.max_batch_size = 4;
+        cfg.overlap_schedule_depth = 0;
+        return cfg;
+    }
+
+    ExecutionPlan AdmitPrompt(const std::string& id, std::vector<std::int32_t> tokens) {
+        Submit(RequestSpec{.request_id = id, .tokens = std::move(tokens)});
+        SendBootstrapped(id);
+        return PlanOnce();
+    }
+
+    void FinishLanding(const std::string& id, std::int32_t token) {
+        SendRemotePrefillDone(id, token);
+        SendFinish(id);
+        PlanOnce();
+    }
+};
+
+class PdReplayablePrefixTestSuite : public PdDecodePrefixTestSuite {
+protected:
+    SchedulerConfig MakeConfig() override {
+        auto cfg = PdDecodePrefixTestSuite::MakeConfig();
+        cfg.max_scheduled_tokens = 64;
+        cfg.prefix_granularity = 8;
+        cfg.cache_groups.front().block_granularity = 8;
+        auto replay = cfg.cache_groups.front();
+        replay.group_id = "replay";
+        replay.block_granularity = 4;
+        replay.retention = CacheGroupConfig::Retention::SlidingWindow;
+        replay.sliding_window_tokens = 16;
+        replay.replayable = true;
+        cfg.cache_groups.push_back(replay);
+        return cfg;
+    }
+};
+
+TEST_F(PdReplayablePrefixTestSuite, LocalHistoryHitStillAllocatesEntireRemoteReplayTail) {
+    AdmitPrompt("seed", MakeTokens(32, 1));
+    FinishLanding("seed", 42);
+    const auto warm = AdmitPrompt("warm", MakeTokens(40, 1));
+    const auto* landing = FindRemoteAdmission(warm);
+    ASSERT_NE(landing, nullptr);
+    EXPECT_EQ(landing->extend_prefix_lens.at(0), 32);
+    EXPECT_EQ(landing->input_lengths.at(0), 8);
+    EXPECT_EQ(landing->extend_replay_lens.at(0), 0);
+    const auto& replay = landing->block_tables.at("replay").at(0);
+    ASSERT_GE(replay.size(), 10u);
+    for (int slot = 6; slot < 10; ++slot) {
+        EXPECT_GT(replay[slot], 0) << "remote tail [25,40) must exist, including before hit 32";
+    }
+}
+
 }  // namespace tokenspeed::test

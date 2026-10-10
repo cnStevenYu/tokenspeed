@@ -578,6 +578,11 @@ Its responsibilities:
   pages are reused while final-state groups are restored from the remote
   endpoint snapshot.
 
+  Replayable groups claim no local prefix hit. A PD decode destination
+  allocates their full retained tail, including blocks before the ordinary
+  history hit, and the transfer manifest selects that same tail in both
+  full and layerwise transfers. The decode peer does not replay the prompt.
+
   `Admit` takes two inputs of different scope and tense. One `GroupDemand`
   per group says what that group needs for the round ahead: an extent and a
   reserve beyond it. The extent is one of two shapes in different reference

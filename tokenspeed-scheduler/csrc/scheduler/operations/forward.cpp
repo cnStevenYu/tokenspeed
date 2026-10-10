@@ -406,7 +406,11 @@ std::optional<fsm::SchedulePrefillFirstChunkEvent> Scheduler::schedulePrefillFir
                         std::max(0, request->PrefillSize() - *group.sliding_window_tokens + 1);
                     demands[i].extent = SparseSuffix{
                         .extent_tokens = request->PrefillSize(),
-                        .first_block = std::max(hit_tokens / block_granularity, retained_begin / block_granularity),
+                        // Replayable groups have no local hit, even when all
+                        // ordinary history is cached. Receive their whole tail.
+                        .first_block = group.replayable ? retained_begin / block_granularity
+                                                        : std::max(hit_tokens / block_granularity,
+                                                                   retained_begin / block_granularity),
                     };
                 }
             }

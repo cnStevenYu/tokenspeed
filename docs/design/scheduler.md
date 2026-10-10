@@ -536,6 +536,15 @@ it, and `Abort`/`Finish`/`RemotePrefillDone` release it by transitioning.
 4. `maybeRetractForCapacity` (§2), whose grant also rides beside the batch
    (a remote admission) or joins it (a blocked decode).
 
+`PrefillDone` retains whether the prompt was computed locally or received
+remotely. Only a remote landing supplies an explicit token to D's first
+decode. After local recovery, decode uses the device's next-input state,
+including any draft candidates, just as on a fused engine. An overlapped
+plan can precede the local prefill result: CPU `LastToken()` still names the
+last prefill input then, so using it as a bootstrap would repeat that input
+at the next position and corrupt both KV and request-token history. The P
+role's outgoing remote-decode operation still carries its completed result.
+
 The old "one of exactly three shapes per round" grammar is gone: a decode
 batch and a remote admission coexist routinely, and only a local recovery
 chunk still claims a round to itself (its load-back's layerwise streaming and
@@ -606,7 +615,11 @@ not filled, so publishing would cache empty KV; the request re-prefills
 the same way. Mixed partners in that forward retract together so ranks
 stay aligned, and a D-role `plan.remote_prefill` admission retracts with
 them — the peer pull is withheld so suffix-only KV cannot land on empty
-prefix pages. The client is not failed. There is no queue to keep in
+prefix pages. The client is not failed. On D, this snapshot-less runtime retraction still
+enters the ordered local readmission phase, just like a capacity retraction
+without Host cache. It cannot go through the fresh remote-admission stream:
+its receiver may already be retired, and local recovery receives no PD ACK.
+There is no queue to keep in
 step with the FSM: a request that finishes or aborts while retracted
 simply stops qualifying, with no bookkeeping to prune.
 Nor is bounded replay (§1.3) carried across a

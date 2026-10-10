@@ -588,10 +588,14 @@ DecodeOperation Scheduler::applyEventAndBuildOperation(Request* request, fsm::Sc
     // it: the D side's first decode (the token crossed the wire with
     // RemotePrefillDoneEvent) and the P side's remote decode (the peer sends
     // it on as the bootstrap token, and the P grammar holds the op until the
-    // result lands). Fused stays -1 on purpose: overlap plans the decode
-    // BEFORE the result lands, and the device fills the input from its
-    // in-flight capture.
-    const bool needs_bootstrap_token = request->Is<fsm::PrefillDone>() && config_.role != Role::kFused;
+    // result lands). Local prefill, including D-role retraction recovery,
+    // stays -1: overlap can plan decode before the prefill result lands.
+    // LastToken() would then overwrite the device's new token with the old
+    // prefill input; an explicit override also discards local draft candidates.
+    const auto* prefill_done = request->GetIf<fsm::PrefillDone>();
+    const bool needs_bootstrap_token =
+        prefill_done != nullptr &&
+        (config_.role == Role::kP || (config_.role == Role::kD && prefill_done->source == fsm::PrefillSource::kRemote));
     const std::int32_t bootstrap_token = needs_bootstrap_token ? request->LastToken() : -1;
     std::vector<std::int32_t> spec_candidate_ids =
         config_.role == Role::kP && needs_bootstrap_token ? request->TakeSpecCandidates() : std::vector<std::int32_t>{};

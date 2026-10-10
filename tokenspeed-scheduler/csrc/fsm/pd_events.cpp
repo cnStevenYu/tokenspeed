@@ -38,7 +38,8 @@ Finished SucceededEvent::operator()(Decoding&& /*state*/) {
 }
 
 PrefillDone RemotePrefillDoneEvent::operator()(RemotePrefilling&& state) {
-    PrefillDone prefill_done{std::move(state.resources), state.window, state.ReserveNumTokensInNextScheduleEvent()};
+    PrefillDone prefill_done{std::move(state.resources), state.window, state.ReserveNumTokensInNextScheduleEvent(),
+                             PrefillSource::kRemote};
     prefill_done.ExtendResultTokens({bootstrap_token});
     return prefill_done;
 }

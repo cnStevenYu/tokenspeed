@@ -87,14 +87,18 @@ class PdTransferHooks:
             elif isinstance(event, PD.RemotePrefillDoneEvent):
                 req_id = event.request_id
                 bootstrap_token = event.bootstrap_token
-                cached_tokens = loop.kv_transfer.pop_remote_cached_tokens(req_id)
+                cache_usage = loop.kv_transfer.pop_remote_cache_usage(req_id)
                 bootstrap_logprob = loop.kv_transfer.pop_remote_bootstrap_logprob(
                     req_id
                 )
                 state = loop.output_processor.rid_to_state.get(req_id)
                 if state is None or not state.to_abort:
                     loop.output_processor.on_remote_prefill_done(
-                        req_id, bootstrap_token, cached_tokens, bootstrap_logprob
+                        req_id,
+                        bootstrap_token,
+                        cache_usage.cached_tokens,
+                        bootstrap_logprob,
+                        decode_prefix_len=cache_usage.decode_prefix_len,
                     )
                 processed.extend(
                     loop.output_processor.finish_remote_prefill_only_request(req_id)

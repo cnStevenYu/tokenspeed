@@ -571,7 +571,7 @@ def test_terminal_events_clear_transport_room_state(
     decode.kv_manager = decode_manager
     decode._admissions = {}
     decode._remote_cache_slots = {}
-    decode._remote_cached_tokens = {}
+    decode._remote_cache_usage = {}
     decode._remote_bootstrap_logprobs = {}
     decode._remote_spec_candidate_ids = {}
     decode.cache_layout = _layout()
@@ -581,12 +581,14 @@ def test_terminal_events_clear_transport_room_state(
 
     assert len(decode.generate_events()) == 1
     assert decode.pop_remote_cache_slot("request") == 7
-    assert decode.pop_remote_cached_tokens("request") == max(2, remote_hits)
+    usage = decode.pop_remote_cache_usage("request")
+    assert usage.cached_tokens == max(2, remote_hits)
+    assert usage.decode_prefix_len == 2
     assert decode.pop_remote_bootstrap_logprob("request") == -0.25
     assert decode.pop_remote_spec_candidate_ids("request") == (7, [1])
     assert decode._admissions == {}
     assert decode._remote_cache_slots == {}
-    assert decode._remote_cached_tokens == {}
+    assert decode._remote_cache_usage == {}
     assert decode._remote_bootstrap_logprobs == {}
     assert decode._remote_spec_candidate_ids == {}
     assert decode_manager.cached_tokens_table == {}

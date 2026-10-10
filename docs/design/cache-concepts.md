@@ -594,6 +594,12 @@ Its responsibilities:
   The PD manifest accepts `0 <= prefix_len <= prompt_len`, with a positive
   prompt and aligned prefix. Upgrade both peers together for complete hits.
 
+  Successful PD landing reports `cached_tokens = max(P_hit, D_hit)`: the
+  peers reuse overlapping prefixes, so adding their hits would double-count.
+  `decode_prefix_len` independently records the decode peer's admission hit;
+  later local recovery does not replace this original PD usage fact. These
+  token counts do not measure private state or replayable-window payload.
+
   `Admit` takes two inputs of different scope and tense. One `GroupDemand`
   per group says what that group needs for the round ahead: an extent and a
   reserve beyond it. The extent is one of two shapes in different reference

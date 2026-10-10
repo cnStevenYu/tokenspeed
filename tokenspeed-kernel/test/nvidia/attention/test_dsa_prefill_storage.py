@@ -23,7 +23,7 @@
 import pytest
 import torch
 from tokenspeed_kernel.ops.attention.dsa import deep_gemm as dsa_deep_gemm
-from tokenspeed_kernel.ops.quantization import quantize_fp8_with_scale
+from tokenspeed_kernel.ops.quantization import quantize_fp8
 
 
 @pytest.mark.parametrize("offset_bytes", [256, 64 * 132 * 65])
@@ -38,7 +38,7 @@ def test_prefill_topk_slab_view_matches_independent_storage(offset_bytes):
     q = torch.randn((queries, heads, dim), device="cuda", dtype=torch.bfloat16)
     weights = torch.rand((queries, heads), device="cuda", dtype=torch.float32)
     keys = torch.randn((rows, dim), device="cuda", dtype=torch.bfloat16)
-    fp8, scales = quantize_fp8_with_scale(
+    fp8, scales = quantize_fp8(
         keys, granularity="token_group", group_size=128, scale_encoding="float32"
     )
     packed = torch.cat(

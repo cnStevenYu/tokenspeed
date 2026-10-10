@@ -22,11 +22,13 @@ compiler's membar analysis tracks every LDS read, write, atomic, async copy,
 and scratch-backed op (layout conversions, reductions, atomic result
 broadcasts), and inserts a CTA barrier immediately before the first conflicting
 access, including across loop back-edges. It also emits a barrier right after
-every `async_copy.wait_group`/`tdm.async_wait`, and the lowering of a
-`release`/`acq_rel` atomic emits one before it (an `acquire` atomic emits one
-after it). A manual barrier next to any of these is a duplicate `s_barrier`, or
-worse, it lands earlier than the compiler's minimal placement and pins the
-instruction schedule.
+every `async_copy.wait_group`/`tdm.async_wait`; a `load_shared_relaxed` skips
+only the barrier against the copy that wait covers, not the write-after-read
+against a later copy refilling its slot. The lowering of a `release`/`acq_rel`
+atomic emits one before it (an `acquire` atomic emits one after it). A manual
+barrier next to any of these is a duplicate `s_barrier`, or worse, it lands
+earlier than the compiler's minimal placement and pins the instruction
+schedule.
 
 Keep an explicit `gl.barrier()` only where the compiler cannot see the hazard:
 
@@ -34,10 +36,6 @@ Keep an explicit `gl.barrier()` only where the compiler cannot see the hazard:
   followed by an overlapping scatter, all-thread stores or atomics that must be
   issued before one thread bumps a `relaxed` counter, or re-reading a global
   buffer other threads just wrote. Say what the barrier orders in a comment.
-- `load_shared_relaxed` pipelines. That load opts out of the compiler's
-  async-copy hazard tracking, so the write-after-read against the next
-  `buffer_load_to_shared` into the same slot is the kernel's responsibility.
-  Place the barrier before the copy that reuses the slot.
 
 Iris push collectives also keep explicit workgroup barriers around their
 cross-rank publication protocol. The VMEM drain and system-scope atomics order
@@ -484,11 +482,25 @@ code, and the boundary tiles mask keys only, since rows past `q_len` are
 never stored. V is not masked: TDM zero-fills tile rows past `kv_len`, and
 those keys score `-inf`.
 
+## Transform
+
+### GFX950 Hadamard query transform
+
+The operation applies a length-128 Hadamard transform with an explicit output
+scale to contiguous BF16 query rows on gfx950, returning the same shape and
+dtype. Empty inputs return an empty output of the same shape.
+
+One 64-lane wave handles each row, keeping two FP32 values per lane during
+seven add/subtract butterfly stages. Their order matches the portable
+reduction tree so the BF16 results agree exactly. The output scale is fixed
+for a compiled kernel; the number of rows is supplied by the launch grid.
+
 ## Sampling
 
 ### Argmax
 
-`tokenspeed_kernel.argmax` returns row-wise indices for `(M, N)` logits. AMD
+`tokenspeed_kernel.ops.sampling.argmax` returns row-wise indices for `(M, N)`
+logits. AMD
 Gluon kernels are selected automatically on gfx950 and gfx1250 when the optional
 `tokenspeed-kernel-amd` package provides both implementations. If either import
 is unavailable, the public API falls back to PyTorch.
@@ -707,6 +719,14 @@ The row tile is resolved from the gathered row count and expert count unless
 the caller pins it. Ragged M and N edges are masked rather than peeled, so a
 trailing partial tile loads only the rows that exist.
 
+The large-batch router counts expert assignments in groups of at most 256
+experts, using four warps in the counting stage. This reduces LDS atomic
+contention when routing across many experts. Duplicate expert IDs are counted
+separately, and invalid IDs are excluded from every group.
+The subsequent prefix scan processes eight adjacent experts per four-warp
+block, coalescing accesses to the row-major chunk-count buffer. Each expert
+retains an independent scan over chunks; partial expert groups are masked.
+
 ### Causal MLA verification on gfx950
 
 `gluon_mla_decode_fp8_query_blocks_gfx950` decodes 2–16 causal queries per
@@ -751,3 +771,24 @@ probabilities by 256 before the E4M3 cast to preserve small weights, and
 divide out that factor at normalization. The projected-value API applies
 the existing value projection to the latent output. Graph replay reads
 updated page tables and lengths in place.
+
+## Residual
+
+### gfx950 mHC pre-mapping
+
+The operation accepts BF16 residual streams shaped `[..., 4, hidden_size]`,
+FP32 projection weights shaped `[24, 4 * hidden_size]`, three FP32 scales,
+24 FP32 biases, normalization epsilons, and a Sinkhorn iteration count. It returns
+a BF16 layer input
+`[..., hidden_size]`, FP32 post coefficients `[..., 4, 1]`, and an FP32
+combination matrix `[..., 4, 4]`. Optional output RMS normalization takes a
+weight vector and its epsilon together.
+
+The four streams are flattened and projected with FP32 accumulation, while
+their squared values provide the residual RMS normalization factor. Projection
+partials are summed. Sigmoid transforms produce the pre/post
+coefficients; a stable softmax followed by alternating Sinkhorn row and column
+normalization produces the combination matrix. The pre coefficients mix the
+four residual streams into the layer input, rounded to BF16 before optional
+output RMS normalization. Staged projection weights are reused across token
+rows, and the final projection tile is masked for arbitrary token counts.

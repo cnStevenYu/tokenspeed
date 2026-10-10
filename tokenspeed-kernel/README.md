@@ -100,7 +100,7 @@ tokenspeed_kernel/
   ops/
     attention/   { mha/, mla/, dsa/, ... }
     gemm/        { triton.py, trtllm.py, ... }
-    moe/         { triton.py, deepep.py, triton_kernels.py, ... }
+    moe/         { triton/, flashinfer/, marlin/, ... }
     ...
 
   numerics/              # Reference impls + tolerance + comparison + CLI
@@ -154,7 +154,7 @@ iteration.
   Each scheduler process — the process where
   kernels actually launch — runs its own Proton session and finalizes it on
   `/stop_profile`, writing
-  `<output_dir>/<profile_id>[-DP<rank>][-CP<rank>]-TP<rank>.proton.<fmt>`
+  `<output_dir>/<profile_id>[-DP<rank>]-TP<rank>.proton.<fmt>`
   per rank. `PROTON` composes only with host-side activities (`CPU`, `MEM`,
   `VIZTRACER`). To see Python activity and Proton's kernel lanes on one
   Perfetto timeline, profile with `VIZTRACER` + `PROTON`
@@ -186,10 +186,26 @@ which CI serving jobs use). Kernel tests guard batch-varying launches with
 `assert_no_triton_compile` in `test/utils.py`. JITs outside Triton, such as
 DeepGEMM's per-shape kernels, are not observed and need the same discipline
 at their call sites.
+A runtime argument still keys the cache: Triton specializes an integer on
+whether it is 1 or divisible by 16, and a pointer on 16-byte alignment. Startup
+warms only the classes graph capture happens to see, so on the serving path a
+per-batch count (tokens, rows, requests) belongs in `do_not_specialize`, and a
+pointer into a buffer sliced at a per-batch offset in
+`do_not_specialize_on_alignment`. A stride that changes between call sites but
+stays a multiple of 16, such as a projection's row width, stays a plain runtime
+argument: one class covers it, and the hint keeps row loads vectorized. A
+batch-derived block size is a fixed block with a loop rather than a
+power-of-two bucket, which still compiles once per new bucket while serving.
+The end-of-startup mark is also the package's compile switch, set whether or
+not the monitor is installed. A kernel whose library compiles once per batch
+shape and cannot bucket it, such as FlashInfer's joint BF16 GEMM (some runners
+compile per exact row count) or the ll_bf16 router's dot-product kernel, checks
+`compile_monitor.is_serving()` where it is dispatched: startup tuning and graph capture use it, and eager calls while
+serving take a GEMM that never compiles (cuBLAS through torch on NVIDIA).
 
 ### Plugins
 
-`python -m tokenspeed_kernel.plugins` lists discovered out-of-tree backends.
+`python -m tokenspeed_kernel.plugins list` lists discovered out-of-tree backends.
 Plugins register via the same `@register_kernel` decorator from their own
 package, set their own priority, and participate in selection like in-tree
 backends. See `tokenspeed_kernel/plugins/README.md`.
@@ -197,13 +213,10 @@ backends. See `tokenspeed_kernel/plugins/README.md`.
 ## Public API
 
 ```python
-from tokenspeed_kernel import (
-    gated_residual_mix, gated_residual_combine, grouped_gemma_rmsnorm,
-    mm,
-    moe_topk,
-    moe_route, moe_dispatch, moe_experts, moe_combine, moe_fused,
-    ...
-)
+from tokenspeed_kernel.ops.gemm import mm
+from tokenspeed_kernel.ops.layernorm import grouped_gemma_rmsnorm
+from tokenspeed_kernel.ops.moe import moe_apply, moe_plan, moe_process_weights, moe_topk
+from tokenspeed_kernel.ops.residual import gated_residual_combine, gated_residual_mix
 from tokenspeed_kernel.ops.attention.gdn import gdn_chunk_prefill
 from tokenspeed_kernel.ops.attention.mha import (
     mha_decode_with_kvcache,

@@ -267,9 +267,9 @@ progress: `TokenContainer::Window{begin, size, replay}` keeps `begin`/`size`
 as the tokens this chunk computes (`replay` is non-zero only on a hit's first
 chunk), and `MakePrefillInfo` derives the model input
 `[begin − replay, begin + size)`. The runtime sees the pair
-`extend_prefix_len = begin − replay` and `extend_replay_len = replay` on the
-`ForwardBatch`; positions `[extend_prefix_len, extend_prefix_len +
-extend_replay_len)` regenerate the replayable groups only and must not be
+`extend_prefix_lens[i] = begin − replay` and `extend_replay_lens[i] = replay` on the
+`ForwardBatch`; positions `[extend_prefix_lens[i], extend_prefix_lens[i] +
+extend_replay_lens[i])` regenerate the replayable groups only and must not be
 written into any other group, whose rows already sit in the shared cached
 pages the hit claimed.
 
@@ -343,6 +343,12 @@ protected tokens that may spill past it; a sliding group, per request,
 `ceil((min(W - 1, ctx) + decode_width + protected + g - 1) / g)` resident
 pages, plus one in-flight prefill chunk behind its lookback (or, on the
 decode role, the landing bound `min(dense, lookback + window)` per request).
+
+Speculative decode admission grows from the committed token frontier plus the verify
+spans still in flight and the span being scheduled. Already reserved slots
+cover that extent first. A prefill interruption must not charge the same
+speculative slots again when decode resumes; otherwise rejected draft tokens
+accumulate in the logical tables beyond the context-length bound.
 
 For an internal checkpoint followed by `tail` tokens, the forward holds
 both the tail and the ordinary growth reserve: the output working set is
@@ -660,7 +666,7 @@ no victim and nothing could free that page.
   re-fed rows are forward input that debits the token budget but never
   advances `num_computed_tokens`; only a hit's first chunk re-feeds, and no
   final chunk is shorter than the replay window (`ChunkKeepingFinalWindow`).
-- A prefill demand's reserve is decided once per group, by retention, in
+- A prefill demand's reserve is decided once per group, by kind, in
   `ReservePrefillDemands` (1); no later step rewrites `reserve_tokens`, and the
   helper asserts it found none set.
 - An incomplete local prefill is not overtaken (1.1). Decodes are never hostage

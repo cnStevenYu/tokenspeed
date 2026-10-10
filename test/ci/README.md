@@ -42,13 +42,18 @@ workflow still fails if either fails. Matrix entries within
 each stage run in parallel. A stage with no matching tasks is treated as
 successfully satisfied.
 
+`ut-tokenspeed-kernel-part-i` runs tests outside `tokenspeed-kernel/test/ops/`,
+keeping the numerics, TRT-LLM communication and CUDA suites in separate processes.
+`ut-tokenspeed-kernel-part-ii` runs `tokenspeed-kernel/test/ops/`; together the two
+tasks cover the kernel suite once.
+
 PRs labeled `high priority` start `unit-test` and `model-test` concurrently.
 Applying the label starts a new CI run immediately and cancels the older run
 through the workflow's concurrency policy. A unit-test failure does not cancel
 model tests that are already running in this mode. AMD kernel benchmarks retain
 their normal unit-test dependency.
 
-The Qwen3.5 FP8 DeepEP correctness task runs GSM8K on four B200 GPUs with
+The Qwen3.5 FP8 DeepEP correctness task runs GSM8K on four GB200 GPUs with
 attention TP2, attention DP2, and MoE EP4. DeepEP `auto` mode exercises its
 normal path during prefill and low-latency path during decode, and the task
 uses the bounded non-thinking chat template for CI stability. The task requires
@@ -381,22 +386,21 @@ archives the clean, committed `HEAD` into the artifact root. The compute node
 extracts that immutable snapshot under `SLURM_TMPDIR` and mounts it at
 `/workspace`, so the checkout itself does not need to be shared. The artifact
 root, cache directory, and any additional host mounts do need to be visible at
-the same paths on the login and compute nodes. The default container is the
-NVIDIA release image
-`docker.io#lightseekorg/tokenspeed:<version>`, where `<version>` is read from
-`python/pyproject.toml`. Override it with `--container-image` when testing a
-different build. The container needs Python and pip. If PyYAML is absent, the
+the same paths on the login and compute nodes. The launcher defaults to the
+digest-pinned `ghcr.io/lightseekorg/tokenspeed-runner` image from
+`test/ci/run_slurm.sh`; override it with `--container-image` (or
+`TS_CI_CONTAINER_IMAGE`) when testing a different build. The container needs Python and pip. If PyYAML is absent, the
 job installs `PyYAML>=6,<7` into its job-local `/tmp` before starting the
 pipeline; images that already provide PyYAML do not perform this bootstrap.
+Task commands that prepend source directories to `PYTHONPATH` must preserve its
+inherited value so these bootstrapped dependencies remain importable.
 
 The generated `sbatch` command uses `/tmp` as its working directory because the
-login-node checkout may not be mounted on compute nodes. Override it with
-`--sbatch-workdir` only when the selected path is compute-node-visible.
+login-node checkout may not be mounted on compute nodes.
 
 By default, the task's top-level `install` stage runs so a runner/base image
 tests the exact committed checkout. Task-specific `eval.install` and
-`perf.install` stages run afterward. Use `--skip-install` only with a release
-image that already contains the intended TokenSpeed build.
+`perf.install` stages run afterward.
 
 The install stage picks up `tokenspeed-mla` from the snapshot only when the
 dispatching workflow sets `INSTALL_TOKENSPEED_MLA_FROM_SOURCE=1`, which the
@@ -409,7 +413,7 @@ in-tree package carry the same version, so pip keeps the wheel and an unreleased
 in-tree kernel change never runs.
 
 The job gets the node exclusively by default so another job cannot contend for
-its GPU or fixed service ports. `--no-exclusive` opts out. Runtime cleanup is
+its GPU or fixed service ports. Runtime cleanup is
 scoped to the Slurm job and never kills unrelated listeners on the node.
 
 Render the exact `sbatch` command and job script without submitting:
@@ -432,7 +436,6 @@ python3 test/ci_system/slurm_submit.py \
   --config test/ci/eval/qwen3.5-397b-a17b-nvfp4-dp4ep4-evalscope-aime25.yaml \
   --partition batch \
   --cache-dir /mnt/lustre01/$USER/tokenspeed-cache \
-  --pass-env HF_TOKEN \
   --follow
 ```
 
@@ -481,8 +484,9 @@ Inferact--Kimi-K3-DSpark/cf6b8244620e7ea4b0651d214f28e89eac75bed6
 ### B300 DeepSWE
 
 `B300 DeepSWE` is a manual, single-node 8-GPU workflow for Kimi K3. It starts
-the local `/raid/cache/jue/kimi-k3-flat2` checkpoint, then runs Kimi Code
-0.23.6 inside the pinned DeepSWE v1.1 Docker tasks through Pier 0.3.1. The
+the local Kimi K3 snapshot under
+`/raid/cache/huggingface/hub/models--moonshotai--Kimi-K3`, then runs Kimi Code
+0.29.0 inside the pinned DeepSWE v1.1 Docker tasks through Pier 0.3.1. The
 default smoke run selects the same deterministic 10-task subset (`seed=0`);
 the workflow also exposes one-task bring-up and the full 113-task corpus.
 
@@ -609,10 +613,10 @@ This is a manual launcher, not a GitHub Actions runner. Override its defaults
 with `TS_CI_ARTIFACT_ROOT`, `TS_CI_CACHE_DIR`, or
 `TS_CI_CONTAINER_IMAGE`.
 
-The default Slurm image pins Torch 2.14.0 and FlashInfer 0.7.0 by image digest.
+The default Slurm image pins Torch 2.14.0 and FlashInfer 0.7.1rc2 by image digest.
 Keep the FlashInfer Python requirement, release cubin checksum, and runner
-JIT-cache version aligned when upgrading. FlashInfer 0.7.0 also requires
-cuDNN frontend 1.29.0 or newer and splits its JIT cache into provider packages.
+JIT-cache version aligned when upgrading. FlashInfer 0.7.1rc2 also requires
+cuDNN frontend 1.30.0 or newer and splits its JIT cache into provider packages.
 GB200/B200 setup resolves those providers from the matching FlashInfer CUDA
 index and checks their installed versions again after dependency installation.
 
@@ -690,18 +694,16 @@ the coordinator pool is persistent.
 
 For a YAML with multiple runner labels, select one or more explicitly with
 repeated `--runner`.
-Site-specific scheduler settings can be supplied with `--account`, `--qos`,
-`--constraint`, `--time`, and `--gpu-type`. Additional host paths can be
-mounted with repeated `--mount HOST:CONTAINER[:FLAGS]` options. Exported
-`HF_TOKEN` and `HUGGING_FACE_HUB_TOKEN` values are passed automatically;
-`--pass-env NAME` passes other exported variables by name without writing their
-values into the job script.
+Site-specific scheduling can be adjusted with `--time` and `--nodelist`.
+Exported `HF_TOKEN` and `HUGGING_FACE_HUB_TOKEN` values are passed
+automatically without writing their values into the job script.
 
 Submitted job snapshots, scripts, metadata, logs, and run results are written
-below `.ci-artifacts/slurm` by default. `--render` only prints the command and
+below the `--artifact-root` directory (`test/ci/run_slurm.sh` defaults it to
+`/mnt/nfs01/$USER/tokenspeed-slurm`, overridable with `TS_CI_ARTIFACT_ROOT`).
+`--render` only prints the command and
 script; it does not create or submit them. The artifact root must be writable
-from the compute node and should be on shared storage. Use `--artifact-root`
-(or `TS_CI_ARTIFACT_ROOT`) to put artifacts elsewhere. `--cache-dir` mounts a
+from the compute node and should be on shared storage. `--cache-dir` mounts a
 persistent host cache at `/home/runner/.cache`, matching the NVIDIA release
 image, and points the Hugging Face and XDG caches there; the directory must
 likewise be visible on the compute node.
@@ -722,3 +724,53 @@ cache, a 120-second socket timeout, and at most three installation attempts
 dependency download handling; retained files, source commit, image and test
 configuration stay unchanged.
 For workflows with one case per GitHub job, use **Re-run failed jobs**.
+
+## PR commands
+
+On an open same-repository PR into `main`, a repository writer can comment
+`@lightseek-bot watch` or `@lightseek-bot fix`.
+
+Completion triggers exclude `main`; its push CI creates no assistance runs.
+`PR CI Assist Dispatch` handles planner and validation dispatches whose controller
+runs on `main`. Closed PRs and PRs without an active authorized watch/fix skip
+the control job. Other PR completions and comments can still create lightweight
+runs, but ordinary comments skip all jobs and inactive callbacks stop at resolve.
+
+- `watch` follows the current CI plan's selected tasks. Failed tasks get one
+  focused reproduction: NVIDIA uses Slurm GB200, then compatible GB300 only if
+  GB200 reports no capacity before submission; AMD uses K8s AMD. A repeated
+  failure or missing result requests human intervention. Running native checks
+  are reused. Queued NVIDIA checks can use the selected Slurm route; queued
+  Slurm allocations and AMD checks are reused. A dispatched check remains the
+  watch's source of results even if native CI starts later.
+  Scheduler changes also watch the existing C++ and Python CPU workflows first;
+  NVIDIA library changes include the native GPU library workflow. Each is matched
+  by its PR path filters, independently of manual dispatch support. Completion
+  requires successful test execution on the current PR head and base. Skipped
+  jobs wait for an eligible run; failures or skipped test steps request human
+  intervention rather than a dispatch retry. CPU-only plans need no GPU task.
+  In-tree MLA Python changes also require a serving task with an explicit
+  `tokenspeed_mla` target or drafter backend; a kernel UT alone is insufficient.
+- `fix` resolves conflicts first, or attempts a focused source repair for an
+  already failed selected task. A separate branch receives the candidate;
+  required pre-commit checks and all selected GPU tasks must pass before the
+  repair is cherry-picked back. Conflict repairs also record the validated
+  merge with `main` so the PR becomes mergeable. A changed head or base stops
+  promotion.
+  Native workflow tracking is limited to `watch`; PR results cannot validate a repair
+  candidate, and conflicted PRs cannot start native PR workflows. `fix` retains
+  selected GPU validation before cherry-pick and required CI on the updated PR.
+
+Only explicit writer commands start repairs. The bot does not edit tests,
+workflow/configuration files or task thresholds automatically, and does not
+merge PRs or bypass required checks. Comments contain a short status table;
+versioned hidden records preserve the selected tasks and immutable source.
+Selected UT files with a known task mapping must be covered by the selected CI
+tasks. Older plans missing that coverage are refreshed once before watching;
+a failed or incomplete refresh requests human intervention.
+For shared serving paths, prioritize the smallest existing model and bounded
+workload with equivalent coverage. Keep larger or model-specific checks when
+changed flags or callers require them.
+`PR CI Assist` can be manually dispatched with a PR number to reconcile an
+existing command. The workflows must be present on `main` for comment and
+completion events to activate them.

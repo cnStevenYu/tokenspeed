@@ -86,6 +86,7 @@ def _load_executor_module_without_triton(*, force_isolated=False):
     host_transfer = ModuleType("tokenspeed_kernel.ops.kvcache.host_transfer")
     host_transfer.HostTransferWorkspace = Mock
     host_transfer.build_host_transfer_geometry = Mock()
+    host_transfer.cache_transfer_device = Mock()
     host_transfer.transfer_cache_blocks = Mock()
     host_transfer.wait_layer_ready = Mock()
     ownership = ModuleType("tokenspeed.runtime.cache.transfer.ownership")
@@ -315,6 +316,10 @@ class GroupAwareWireTest(unittest.TestCase):
     def test_pool_transfer_layout_matches_scheduler_group_order(self):
         try:
             from cache_pool_test_utils import MinimalCacheView
+
+            from tokenspeed.runtime.layers.attention.kv_cache.recipes.storage import (
+                FieldStorageBinding,
+            )
         except (ImportError, ModuleNotFoundError) as exc:
             self.skipTest(f"needs runtime dependencies: {exc}")
 
@@ -369,7 +374,13 @@ class GroupAwareWireTest(unittest.TestCase):
             ),
         )
 
-        pool.arena.storage_plan = SimpleNamespace(host_bytes=0)
+        pool.arena.regions = {"device": pool.arena.buffer}
+        pool.arena.storage_plan = SimpleNamespace(
+            fields=(
+                FieldStorageBinding("layer.1.k", "device", 0),
+                FieldStorageBinding("layer.0.state", "device", 0),
+            )
+        )
         layout = pool.cache_transfer_layout()
 
         self.assertEqual(

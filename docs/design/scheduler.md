@@ -43,10 +43,13 @@ declared `block_granularity`, using the same reservation interface as later
 prefill chunks.
 
 **What the probe may claim.** Before the first chunk, `matchPrefixAtAdmission`
-probes the prefix cache for the prompt's leading pages. The probe is bounded
+probes the prefix cache for the prompt's leading pages. It derives `PrefillSource`
+from the scheduler role and request state, using the same rule as first-chunk
+scheduling: a submitted D request is remote; local recovery is local. The probe is bounded
 in tokens, and the bound is the minimum of two rules: the configured replay
-tail (`prefix_replay_tokens`, at least the final prompt token, which is always
-recomputed to produce logits) and the request's own
+tail (local prefill uses `prefix_replay_tokens`, at least the final prompt
+token recomputed for logits; D remote admission has no local replay tail)
+and the request's own
 `RequestSpec::max_cached_prefix_tokens` (default `INT32_MAX`, no bound). The
 per-request bound exists for prompt (input) logprobs: a request that returns
 them from position `s` needs logits for every position at or after `s`, and a
@@ -535,6 +538,12 @@ it, and `Abort`/`Finish`/`RemotePrefillDone` release it by transitioning.
    arrives. Head-of-line (1.1) does not apply — there is no mid-way.
 4. `maybeRetractForCapacity` (§2), whose grant also rides beside the batch
    (a remote admission) or joins it (a blocked decode).
+
+A remote admission reserves the whole missing suffix without local chunk,
+replay or promotion limits. Complete history hits have a zero-token remote
+operation, still holding request slots and decode reserve until the peer's
+bootstrap token arrives. Final-state snapshots and replayable retained windows
+remain private remote destinations; only ordinary cached history skips transfer.
 
 The old "one of exactly three shapes per round" grammar is gone: a decode
 batch and a remote admission coexist routinely, and only a local recovery

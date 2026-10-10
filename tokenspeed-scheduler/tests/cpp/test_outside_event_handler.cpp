@@ -915,7 +915,8 @@ TEST_F(PdSparseDecodeAdmissionTestSuite, ReusesHistoryPrefixAndLeavesStatePrefix
     const ExecutionPlan plan = PlanOnce();
     const ForwardBatch* destination = FindRemoteAdmission(plan);
     ASSERT_NE(destination, nullptr);
-    EXPECT_EQ(destination->input_lengths, (std::vector<std::int32_t>{2}));
+    EXPECT_EQ(destination->input_lengths, (std::vector<std::int32_t>{0}));
+    EXPECT_EQ(destination->extend_prefix_lens, (std::vector<std::int32_t>{8}));
 
     const auto& full = destination->block_tables.at("full").at(0);
     ASSERT_EQ(full.size(), 5u);
@@ -1070,6 +1071,94 @@ TEST_F(PdReplayablePrefixTestSuite, LocalHistoryHitStillAllocatesEntireRemoteRep
     for (int slot = 6; slot < 10; ++slot) {
         EXPECT_GT(replay[slot], 0) << "remote tail [25,40) must exist, including before hit 32";
     }
+}
+
+TEST_F(PdDecodePrefixTestSuite, WholePromptHitStillWaitsForBootstrapAndReservesDecode) {
+    const auto cold = AdmitPrompt("seed", {1, 2, 3, 4});
+    ASSERT_NE(FindRemoteAdmission(cold), nullptr);
+    const auto seed_blocks = FindRemoteAdmission(cold)->block_tables.at("full").at(0);
+    FinishLanding("seed", 42);
+
+    const auto warm = AdmitPrompt("warm", {1, 2, 3, 4});
+    const auto* landing = FindRemoteAdmission(warm);
+    ASSERT_NE(landing, nullptr);
+    EXPECT_EQ(landing->extend_prefix_lens, (std::vector<std::int32_t>{4}));
+    EXPECT_EQ(landing->input_lengths, (std::vector<std::int32_t>{0}));
+    EXPECT_TRUE(landing->input_ids.empty());
+    const auto& blocks = landing->block_tables.at("full").at(0);
+    ASSERT_EQ(blocks.size(), 3u);
+    EXPECT_EQ(blocks[0], seed_blocks[0]);
+    EXPECT_EQ(blocks[1], seed_blocks[1]);
+    EXPECT_GT(blocks[2], 0);
+    const auto waiting = PlanOnce();
+    const auto* idle = FindForwardBatch(waiting.Operations());
+    EXPECT_TRUE(idle == nullptr || idle->request_ids.empty());
+
+    SendRemotePrefillDone("warm", 43);
+    const auto decoded = PlanOnce();
+    const auto* forward = FindForwardBatch(decoded.Operations());
+    ASSERT_NE(forward, nullptr);
+    EXPECT_TRUE(forward->extend_prefix_lens.empty());
+    EXPECT_EQ(forward->decode_input_ids, (std::vector<std::int32_t>{43}));
+    SendForwardDone("warm", {44});
+    SendFinish("warm");
+}
+
+TEST_F(PdDecodePrefixTestSuite, RemotePromptHitPreservesPerRequestProbeCap) {
+    AdmitPrompt("seed", {1, 2, 3, 4});
+    FinishLanding("seed", 42);
+
+    Submit(RequestSpec{.request_id = "capped", .tokens = {1, 2, 3, 4}, .max_cached_prefix_tokens = 2});
+    SendBootstrapped("capped");
+    const auto plan = PlanOnce();
+    const auto* landing = FindRemoteAdmission(plan);
+    ASSERT_NE(landing, nullptr);
+    EXPECT_EQ(landing->extend_prefix_lens, (std::vector<std::int32_t>{2}));
+    EXPECT_EQ(landing->input_lengths, (std::vector<std::int32_t>{2}));
+}
+
+TEST_F(PdDecodePrefixTestSuite, SingleOutputFinishNeverPublishesBootstrapToken) {
+    for (std::int32_t length : {1, 3, 4}) {
+        const std::int32_t start = 100 * length;
+        const auto prompt = MakeTokens(length, start);
+        const auto cold = AdmitPrompt("seed", prompt);
+        ASSERT_NE(FindRemoteAdmission(cold), nullptr);
+        FinishLanding("seed", 9000);
+        auto continuation = prompt;
+        continuation.insert(continuation.end(), {9000, 9001});
+        const auto retry = AdmitPrompt("retry", continuation);
+        const auto* landing = FindRemoteAdmission(retry);
+        ASSERT_NE(landing, nullptr);
+        EXPECT_EQ(landing->extend_prefix_lens.at(0), length / 2 * 2);
+        ExecutionEvent failed;
+        failed.With(pd::FailedEvent{"retry"});
+        scheduler_->Advance(std::move(failed));
+        PlanOnce();
+    }
+}
+
+TEST_F(PdDecodePrefixTestSuite, FailedTransferPreservesOnlyPreviouslyPublishedPrefix) {
+    AdmitPrompt("seed", {1, 2, 3, 4});
+    FinishLanding("seed", 42);
+    const auto failed_admission = AdmitPrompt("failed", {1, 2, 3, 4, 5, 6, 7, 8});
+    ASSERT_NE(FindRemoteAdmission(failed_admission), nullptr);
+    ASSERT_EQ(FindRemoteAdmission(failed_admission)->extend_prefix_lens.at(0), 4);
+    ExecutionEvent failed;
+    failed.With(pd::FailedEvent{"failed"});
+    scheduler_->Advance(std::move(failed));
+    const auto retry = AdmitPrompt("retry", {1, 2, 3, 4, 5, 6, 7, 8});
+    ASSERT_NE(FindRemoteAdmission(retry), nullptr);
+    EXPECT_EQ(FindRemoteAdmission(retry)->extend_prefix_lens.at(0), 4);
+}
+
+TEST_F(PdDecodePrefixTestSuite, FailedColdTransferPublishesNothing) {
+    AdmitPrompt("failed", {1, 2, 3, 4});
+    ExecutionEvent failed;
+    failed.With(pd::FailedEvent{"failed"});
+    scheduler_->Advance(std::move(failed));
+    const auto retry = AdmitPrompt("retry", {1, 2, 3, 4});
+    ASSERT_NE(FindRemoteAdmission(retry), nullptr);
+    EXPECT_EQ(FindRemoteAdmission(retry)->extend_prefix_lens.at(0), 0);
 }
 
 }  // namespace tokenspeed::test

@@ -4085,8 +4085,7 @@ TEST(DecodeDestinationTest, HistoryGroupsDeterminePrefixAndStateGetsAlignedHoles
     ASSERT_EQ(probe.device.per_group.size(), 2u);
     ASSERT_EQ(probe.device.per_group[0].hits.size(), 3u);
     EXPECT_TRUE(std::ranges::all_of(probe.device.per_group[0].hits, [](std::int32_t page_id) { return page_id != 0; }));
-    ASSERT_EQ(probe.device.per_group[1].hits.size(), 3u);
-    EXPECT_TRUE(std::ranges::all_of(probe.device.per_group[1].hits, [](std::int32_t page_id) { return page_id == 0; }));
+    EXPECT_TRUE(probe.device.per_group[1].hits.empty());
 
     std::vector<BlockTable> tables(coordinator.NumGroups());
     std::vector<GroupDemand> demands{

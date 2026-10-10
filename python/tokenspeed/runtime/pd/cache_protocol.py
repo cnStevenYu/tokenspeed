@@ -452,8 +452,10 @@ def validate_cache_manifest(
     layout: CacheTransferContract,
     peer: str,
 ) -> None:
-    if manifest.prefix_len >= manifest.prompt_len:
-        raise CacheContractError(f"{peer} manifest requires prefix_len < prompt_len")
+    if not 0 <= manifest.prefix_len <= manifest.prompt_len or manifest.prompt_len <= 0:
+        raise CacheContractError(
+            f"{peer} manifest requires 0 <= prefix_len <= prompt_len and prompt_len > 0"
+        )
     expected = tuple(spec.group_id for spec in layout.group_specs)
     actual = tuple(group.group_id for group in manifest.groups)
     if actual != expected:
@@ -493,8 +495,10 @@ def build_cache_block_manifest(
     prompt_len: int,
 ) -> CachePDBlockManifest:
     """Select each group's blocks according to its explicit transfer policy."""
-    if prefix_len >= prompt_len:
-        raise CacheContractError("Cache-transfer PD requires prefix_len < prompt_len")
+    if not 0 <= prefix_len <= prompt_len or prompt_len <= 0:
+        raise CacheContractError(
+            "Cache-transfer PD requires 0 <= prefix_len <= prompt_len and prompt_len > 0"
+        )
     if prefix_len % layout.plan.prefix_granularity:
         raise CacheContractError(
             "Cache-transfer PD prefix_len must be aligned to prefix_granularity"
@@ -566,8 +570,10 @@ def build_cache_layerwise_block_selection(
         raise CacheContractError(
             "Cache-transfer PD prefix_len must be aligned to prefix_granularity"
         )
-    if prefix_len >= prompt_len:
-        raise CacheContractError("layerwise selection requires prefix_len < prompt_len")
+    if not 0 <= prefix_len <= prompt_len or prompt_len <= 0:
+        raise CacheContractError(
+            "layerwise selection requires 0 <= prefix_len <= prompt_len and prompt_len > 0"
+        )
     if chunk_start >= chunk_end:
         raise CacheContractError("layerwise selection requires chunk_start < chunk_end")
     if chunk_end > prompt_len:

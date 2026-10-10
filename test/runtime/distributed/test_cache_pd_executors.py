@@ -1870,3 +1870,62 @@ def test_every_sharded_prefill_rank_serves_every_decode_rank() -> None:
                 ),
             )
         )
+
+
+def test_full_history_hit_needs_no_dma_but_still_sends_bootstrap_metadata():
+    from tokenspeed.runtime.pd import decode_executor as decode_module
+    from tokenspeed.runtime.pd import prefill_executor as prefill_module
+
+    layout = make_layout(make_group("history", make_segment("layer.0.k")), capacity=8)
+    manifest = make_block_manifest(("history", ()), prefix=4, prompt=4)
+    manager, dma_calls = _recording_transfer_manager(layout, 0x1000)
+    assert (
+        _transfer_cache(
+            manager,
+            "session",
+            0x2000,
+            (),
+            src_block_manifest=manifest,
+            dst_block_manifest=manifest,
+            dst_cache_layout=layout,
+        )
+        == 0
+    )
+    assert dma_calls == []
+
+    op = make_operation(
+        {"history": np.array([[1, 2, 3]], dtype=np.int32)},
+        request_ids=["request-0"],
+        request_pool_indices=[7],
+        extend_prefix_lens=[4],
+        prefill_lengths=[4],
+        num_extends=lambda: 1,
+        decode_input_ids=[42],
+        spec_candidate_ids=[[]],
+        input_lengths=[0],
+    )
+    received = []
+    decode = object.__new__(decode_module.DisaggDecodeExecutor)
+    decode.cache_layout = layout
+    decode.receivers = {
+        "request-0": SimpleNamespace(
+            prefill=lambda *, block_manifest: received.append(block_manifest)
+        )
+    }
+    decode._admissions = {}
+    decode._cache_prefill(op)
+    assert received == [manifest]
+    assert decode._admissions == {"request-0": (7, 4)}
+
+    sent = []
+    prefill = object.__new__(prefill_module.DisaggPrefillExecutor)
+    prefill._layerwise_enabled = False
+    prefill.cache_layout = layout
+    prefill.senders = {"request-0": _RecordingSender(sent)}
+    destination = TransferInfo.from_zmq([b"9", b"session", manifest.to_wire_bytes()])
+    prefill.kv_manager = SimpleNamespace(transfer_infos={9: {"session": destination}})
+    prefill._cache_decode(op)
+    assert len(sent) == 1
+    _, metadata = sent[0]
+    assert metadata["bootstrap_token"] == 42
+    assert metadata["block_manifest"] == manifest

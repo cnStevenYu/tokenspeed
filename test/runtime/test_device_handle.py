@@ -121,8 +121,8 @@ class _DecodeExecutor(DisaggDecodeExecutor):
     def generate_events(self):
         return self._events
 
-    def pop_remote_cached_tokens(self, request_id):
-        return 0
+    def pop_remote_cache_usage(self, request_id):
+        return SimpleNamespace(cached_tokens=0, decode_prefix_len=0)
 
     def pop_remote_bootstrap_logprob(self, request_id):
         return None
@@ -183,7 +183,7 @@ def _planned(*, num_extends, label=None):
 def _loop(trace, kv_transfer, state):
     output_processor = SimpleNamespace(
         rid_to_state={"r0": state} if state is not None else {},
-        on_remote_prefill_done=lambda rid, tok, cached_tokens, logprob: trace.append(
+        on_remote_prefill_done=lambda rid, tok, cached_tokens, logprob, *, decode_prefix_len: trace.append(
             ("bootstrap", tok)
         ),
         finish_remote_prefill_only_request=lambda rid: [],

@@ -59,7 +59,6 @@ class KVOffloadAdapter:
         self.writes = {}
         self.reads = {}
         self.seeds = {}
-        self.extend_writes = {}
         # Layers whose selection this step has already mapped, by forward
         # mode. Offload rows are only addressable after their prepare, so
         # every consumer cross-checks this instead of falling back silently.
@@ -80,10 +79,6 @@ class KVOffloadAdapter:
         self.seeds.clear()
         self.prepared.clear()
         self.engine.begin(requests, num_extends=num_extends, stream=stream)
-
-    def set_extend_writes(self, writes):
-        """Bind recovery history destinations for offloading staging writes."""
-        self.extend_writes = writes
 
     def _seed(self, name, positions):
         """Seed offloaded short-prefix/ring rows using this group's page table."""
@@ -110,7 +105,6 @@ class KVOffloadAdapter:
         """Whether KV offloading prepared this layer for the same forward family.
 
         Compare extend/decode families rather than exact mode identity.
-        This guard does not grant support for mixed recovery batches.
         """
         mode = self.prepared.get(layer_id)
         return mode is not None and mode.is_extend() == forward_mode.is_extend()
@@ -135,26 +129,20 @@ class KVOffloadAdapter:
         """Prepare one offloaded field and return its compute write slots.
 
         Decode seeds history and resolves hot reads/current writes, joining
-        any producer prefetch. Extend reserves chunk projection writes.
+        any producer prefetch. Offloaded fields accept decode only.
         Non-offloaded layers return their ordinary history write slots.
         """
         name = self.fields.get(layer.layer_id)
         if name is None:
             return self.router.write_locations(layer, mode)
         if mode.is_extend():
-            group = self.groups[name]
-            full = self.extend_writes[group]
-            self.writes[layer.layer_id] = self.engine.prepare_extend(name, full)
-        else:
-            self._seed(name, positions)
-            mapped, writes = self.engine.resolve(
-                name,
-                topk,
-                positions,
-                self.router.write_locations(layer, mode),
-            )
-            self.writes[layer.layer_id] = writes
-            self.reads[layer.layer_id] = mapped
+            raise ValueError("offloaded KV must be restored by snapshot, not prefill")
+        self._seed(name, positions)
+        mapped, writes = self.engine.resolve(
+            name, topk, positions, self.router.write_locations(layer, mode)
+        )
+        self.writes[layer.layer_id] = writes
+        self.reads[layer.layer_id] = mapped
         self.prepared[layer.layer_id] = mode
         return self.writes[layer.layer_id]
 
@@ -184,13 +172,3 @@ class KVOffloadAdapter:
                 )
             return original
         return mapped
-
-    def prefill_tiles(self, layer, selected):
-        """Return the offloading recovery iterator, or None for ordinary KV."""
-        name = self.fields.get(layer.layer_id)
-        if name is None:
-            return None
-        from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
-
-        self.compute_write_locations(layer, ForwardMode.EXTEND)
-        return self.engine.prefill_tiles(name, selected)

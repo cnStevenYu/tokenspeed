@@ -63,6 +63,7 @@ from typing import NamedTuple
 import torch
 from tokenspeed_kernel.ops.kvcache.host_transfer import (
     HostTransferWorkspace,
+    cache_transfer_device,
     transfer_cache_blocks,
     wait_layer_ready,
 )
@@ -237,6 +238,13 @@ class HostCacheExecutor:
             draft_layout,
             group_ids=scheduler_group_ids or None,
         )
+        if io_backend == "direct" and any(
+            buffer.device.type == "cpu" for buffer in self.layout.buffers
+        ):
+            raise ValueError(
+                "Host authoritative KV requires --kvstore-io-backend kernel "
+                "for stream-ordered snapshots"
+            )
         host_lcm_block_bytes = compute_host_lcm_block_bytes(self.layout)
 
         # --- L2 prefix tier -------------------------------------------------
@@ -317,7 +325,7 @@ class HostCacheExecutor:
                 num_host_lcm_blocks=snapshot_lcm_blocks,
                 rank=dcp_rank,
             )
-            # One row per retracted request, indexed by the op's snapshot_slot.
+            # C++ SnapshotSlotAllocator uses IDs 1..N; compact blob rows use 0..N-1.
             self.blob_arena = allocate_blob_arena(
                 self.max_retracted_requests, self.blob_bytes
             )
@@ -1017,10 +1025,10 @@ class HostCacheExecutor:
                 f"{type(op).__name__} {op.op_id} needs the retraction snapshot pool, "
                 "which --retraction-snapshot-ratio 0 removed"
             )
-        if not 0 <= int(op.snapshot_slot) < self.max_retracted_requests:
+        if not 1 <= int(op.snapshot_slot) <= self.max_retracted_requests:
             raise IndexError(
                 f"snapshot slot {op.snapshot_slot} outside "
-                f"[0, {self.max_retracted_requests}) for op {op.op_id}"
+                f"[1, {self.max_retracted_requests}] for op {op.op_id}"
             )
 
     def _append_snapshot_store(
@@ -1123,7 +1131,7 @@ class HostCacheExecutor:
         for op in ops:
             self._slot_state.export(
                 int(op.request_pool_index),
-                self.blob_arena[int(op.snapshot_slot)],
+                self.blob_arena[int(op.snapshot_slot) - 1],
                 self.write_stream,
                 request_id=str(op.request_id),
             )
@@ -1191,7 +1199,7 @@ class HostCacheExecutor:
         for op in ops:
             self._slot_state.import_(
                 int(op.request_pool_index),
-                self.blob_arena[int(op.snapshot_slot)],
+                self.blob_arena[int(op.snapshot_slot) - 1],
                 self.load_stream,
                 request_id=str(op.request_id),
             )
@@ -1366,7 +1374,7 @@ class HostCacheExecutor:
             if load_index is None:
                 raise RuntimeError("cache transfer layout has no layer consumers")
 
-            device = self.layout.buffers[0].device
+            device = cache_transfer_device(self.layout.buffers)
             workspace = self._load_workspaces[load_index]
             num_blocks, _ = workspace.load_block_transfers(
                 transfers, geometry=self._transfer_geometry

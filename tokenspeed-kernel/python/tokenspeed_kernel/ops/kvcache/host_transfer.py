@@ -68,6 +68,14 @@ class _MappedHostUnavailable(RuntimeError):
     pass
 
 
+def cache_transfer_device(buffers: Sequence[torch.Tensor]) -> torch.device:
+    """The execution device of authoritative Device/pinned-Host regions."""
+    return next(
+        (buffer.device for buffer in buffers if buffer.device.type != "cpu"),
+        buffers[0].device,
+    )
+
+
 def layer_ready_ptx_supported() -> bool:
     """Layer-ready flags use NVIDIA PTX acquire/release; AMD must not compile them."""
 
@@ -350,7 +358,7 @@ class HostTransferWorkspace:
         """Resolve capability before submitting payload or publishing waits.
 
         Args:
-            device_buffers: Cache buffers on one device.
+            device_buffers: Authoritative regions on one device or pinned Host.
             host_buffer: Pinned Host allocation to map.
             backend: Requested transport; only auto may fall back to DMA.
 
@@ -360,7 +368,14 @@ class HostTransferWorkspace:
         """
         if backend not in ("auto", "triton", "dma"):
             raise ValueError(f"unknown cache transfer backend {backend!r}")
-        device = device_buffers[0].device
+        device = cache_transfer_device(device_buffers)
+        mixed = device.type != "cpu" and any(
+            buffer.device.type == "cpu" for buffer in device_buffers
+        )
+        if mixed and (backend == "dma" or device.type != "cuda"):
+            raise ValueError(
+                "pinned Host cache regions require mapped kernel transfers on CUDA"
+            )
         if backend == "dma" or device.type == "npu":
             if backend == "triton":
                 raise RuntimeError("mapped Host Triton transfer is unavailable on NPU")
@@ -377,7 +392,7 @@ class HostTransferWorkspace:
             try:
                 self._address_table = self.bind_addresses(device_buffers, host_buffer)
             except _MappedHostUnavailable:
-                if backend == "triton":
+                if backend == "triton" or mixed:
                     raise
                 self._mode = HostTransferMode("dma", layer_ready=False)
                 warnings.warn(
@@ -417,7 +432,7 @@ class HostTransferWorkspace:
         device_buffers: Sequence[torch.Tensor],
         host_buffer: torch.Tensor,
     ) -> torch.Tensor:
-        device = device_buffers[0].device
+        device = cache_transfer_device(device_buffers)
         try:
             host_ptr = int(current_platform().device_visible_data_ptr(host_buffer))
         except (AttributeError, RuntimeError) as error:
@@ -429,7 +444,18 @@ class HostTransferWorkspace:
             int(device.index if device.index is not None else 0),
         )
         if self._address_table is None or self._address_key != key:
-            addresses = [int(buffer.data_ptr()) for buffer in device_buffers]
+            addresses = []
+            for buffer in device_buffers:
+                if buffer.device.type == "cpu" and device.type != "cpu":
+                    if not buffer.is_pinned() or not buffer.is_contiguous():
+                        raise ValueError(
+                            "Host cache regions must be contiguous and pinned"
+                        )
+                    addresses.append(
+                        int(current_platform().device_visible_data_ptr(buffer))
+                    )
+                else:
+                    addresses.append(int(buffer.data_ptr()))
             addresses.append(host_ptr)
             self._address_table = torch.tensor(
                 addresses, dtype=torch.uint64, device=device
@@ -826,7 +852,7 @@ def transfer_cache_blocks(
     def _publish_dma_flags() -> None:
         if layer_ready_flags is None:
             return
-        device_module = torch.get_device_module(device_buffers[0].device)
+        device_module = torch.get_device_module(cache_transfer_device(device_buffers))
         with device_module.stream(stream) if stream is not None else nullcontext():
             layer_ready_flags.fill_(1)
 
@@ -867,7 +893,7 @@ def transfer_cache_blocks(
         workspace.host_block_rows(num_blocks)
         return
 
-    device_module = torch.get_device_module(device_buffers[0].device)
+    device_module = torch.get_device_module(cache_transfer_device(device_buffers))
     with device_module.stream(stream) if stream is not None else nullcontext():
         mode = workspace.prepare_backend(device_buffers, host_buffer, backend=backend)
         if not mode.uses_device_tables:
@@ -988,7 +1014,7 @@ def _transfer_cache_ranges(
     _validate_ranges(device_buffers, host_buffer, ranges)
     if not ranges:
         return
-    device_module = torch.get_device_module(device_buffers[0].device)
+    device_module = torch.get_device_module(cache_transfer_device(device_buffers))
     with device_module.stream(stream):
         _transfer_dma(direction, device_buffers, host_buffer, ranges)
 

@@ -203,8 +203,7 @@ class CachePoolBinding:
         Broadcast to child backends; leaves without offloading do nothing.
         Clear last-step read/write mappings, mask null/padded requests, and
         order residency work on stream. This does not allocate history.
-        num_extends identifies recovery rows; the current offload engine
-        requires recovery to occupy a separate, all-extend batch.
+        num_extends identifies prefill rows, which offloaded arenas reject.
         """
         for child in self.child_backends():
             child.prepare_cache_batch(
@@ -217,8 +216,6 @@ class CachePoolBinding:
         Broadcast to child backends; leaves without offloading do nothing.
         Join writeback to the execution stream before publishing completion.
         accept_lengths counts accepted target-input rows, not output tokens.
-        Recovery retains all extend rows; its tile iterator may already have
-        flushed the chunk before reusing staging storage.
         """
         for child in self.child_backends():
             child.writeback_accepted_kv(accept_lengths)

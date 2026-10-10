@@ -38,12 +38,11 @@ class KVOffloadPolicy:
     # Producer field -> fields consuming that producer's selection.
     selection_consumers: tuple[tuple[str, str], ...]
 
-    def bind(self, *, request_slots: int, device_rows: int, max_extend_tokens: int):
+    def bind(self, *, request_slots: int, device_rows: int):
         return KVOffloadConfig(
             **{f.name: getattr(self, f.name) for f in fields(KVOffloadPolicy)},
             request_slots=request_slots,
             device_rows=device_rows,
-            max_extend_tokens=max_extend_tokens,
         )
 
 
@@ -53,7 +52,6 @@ class KVOffloadConfig(KVOffloadPolicy):
 
     request_slots: int
     device_rows: int
-    max_extend_tokens: int
 
     def __post_init__(self):
         for name in (
@@ -64,7 +62,6 @@ class KVOffloadConfig(KVOffloadPolicy):
             "queries",
             "host_budget_bytes",
             "device_rows",
-            "max_extend_tokens",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -85,9 +82,7 @@ class KVOffloadConfig(KVOffloadPolicy):
         if self.device_rows >= 2**31:
             raise ValueError("KV offload row IDs must fit int32")
         if self.request_slots < 3 or self.device_rows < self.minimum_device_rows:
-            raise ValueError(
-                "KV offload pool must hold all request slots and extend writes"
-            )
+            raise ValueError("KV offload pool must hold all request slots")
         if len(set(self.selection_consumers)) != len(self.selection_consumers):
             raise ValueError("duplicate selection dependency")
 
@@ -101,17 +96,11 @@ class KVOffloadConfig(KVOffloadPolicy):
 
     @property
     def minimum_device_rows(self):
-        return max(self.hot_rows, self.max_extend_tokens + 1)
-
-    @property
-    def recovery_query_tokens(self):
-        # Bound both the transfer working set and kernel launch count. Each
-        # selection entry has its own row; no dynamic-size union is required.
-        return min(32, self.max_extend_tokens, (self.device_rows - 1) // self.topk)
+        return self.hot_rows
 
     def metadata_counts(self) -> dict[str, int]:
         """Named int32 allocations, shared by the allocator and byte planner."""
-        currents = max(self.request_slots * self.queries, self.max_extend_tokens)
+        currents = self.request_slots * self.queries
         from tokenspeed_kernel.ops.kvcache.offload import hash_geometry
 
         table_slots, shared = hash_geometry(self.queries, self.topk)
@@ -136,5 +125,5 @@ class KVOffloadConfig(KVOffloadPolicy):
         }
 
     def temporary_bytes(self) -> int:
-        """Bounded recovery gather; decode hash scratch is persistent metadata."""
-        return 32 * self.topk * 24 + self.max_extend_tokens * 12
+        """Decode hash scratch is accounted for in persistent metadata."""
+        return 0

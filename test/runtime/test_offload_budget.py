@@ -62,7 +62,7 @@ def geometry():
         max_padding_fraction=0.25,
     )
     config = KVOffloadPolicy(("hot",), 64, 4, 16, 1, 1 << 20, True, 0, ()).bind(
-        request_slots=8, device_rows=1024, max_extend_tokens=32
+        request_slots=8, device_rows=1024
     )
     return layout, (group,), config
 
@@ -141,9 +141,9 @@ def test_concurrency_sets_pool_demand(request_slots, expected_rows):
 
 
 @pytest.mark.parametrize("probe", [None, 2])
-def test_extend_chunk_can_exceed_concurrency_demand(probe):
+def test_fixed_pool_does_not_keep_obsolete_extend_staging(probe):
     layout, groups, cfg = geometry()
-    cfg = replace(cfg, max_extend_tokens=1024, device_rows=1032)
+    cfg = replace(cfg, device_rows=1032)
     _, actual = compute_offload_capacity(
         layout,
         groups,
@@ -152,8 +152,8 @@ def test_extend_chunk_can_exceed_concurrency_demand(probe):
         max_lcm_blocks=32,
         probe_lcm_blocks=probe,
     )
-    assert actual.device_rows == 1032  # 1024 writes + null row, rounded to 8.
-    assert actual.device_rows > actual.hot_rows
+    assert actual.device_rows == 544
+    assert actual.device_rows == actual.hot_rows
 
 
 def test_bound_config_rejects_incomplete_request_partitions():
@@ -195,6 +195,7 @@ def test_remote_pd_landing_holds_the_only_hot_request_partition():
     cfg.max_scheduled_tokens = 64
     cfg.decode_input_tokens = 1
     cfg.disable_l2_cache = True
+    cfg.num_snapshot_pages = 1
     cfg.disable_prefix_cache = True
     cfg.cache_groups = [
         ts.CacheGroupConfig(

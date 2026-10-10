@@ -83,8 +83,8 @@ private:
 
 // The slot-state blob slots of retracted requests: the same RAII slot pool,
 // sized by SchedulerConfig::max_retracted_requests, slots numbered from 1 like
-// request-pool indices (the runtime's blob arena has max_retracted_requests + 1
-// rows). A retracted request that finishes, aborts or is restored releases
+// request-pool indices (compact runtime blob row = slot - 1). A retracted
+// request that finishes, aborts or is restored releases
 // its slot by dropping the index.
 using SnapshotSlotAllocator = ReqPoolAllocator;
 using SnapshotSlotIndex = ReqPoolIndex;

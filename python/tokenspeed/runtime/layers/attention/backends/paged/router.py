@@ -73,14 +73,14 @@ from tokenspeed.runtime.layers.attention.backends.support import TreeSupport
 if TYPE_CHECKING:
     from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
     from tokenspeed.runtime.execution.query_shard import QueryShardPlan
+    from tokenspeed.runtime.layers.attention.backends.paged.offload_adapter import (
+        KVOffloadAdapter,
+    )
     from tokenspeed.runtime.layers.attention.backends.paged.tree_verify import (
         TreeVerifyInputs,
     )
     from tokenspeed.runtime.layers.attention.dcp.cache import (
         HistoryGatherWorkspace,
-    )
-    from tokenspeed.runtime.layers.attention.backends.paged.offload_adapter import (
-        KVOffloadAdapter,
     )
     from tokenspeed.runtime.layers.attention.kv_cache.base import CachePool
     from tokenspeed.runtime.layers.paged_attention import PagedAttention
@@ -529,6 +529,13 @@ class CacheGroupRouter(AttentionBackend):
                 addresses, self._decode_window_of(gid), path, row_bytes=row_bytes
             )
 
+    def import_slot_state(self, slot, src, stream, *, request_id):
+        super().import_slot_state(slot, src, stream, request_id=request_id)
+        if self._offload_adapter is not None:
+            with torch.cuda.stream(stream):
+                slots = torch.tensor([slot], dtype=torch.int64, device=self.device)
+            self._offload_adapter.engine.reset_requests(slots, stream=stream)
+
     def prepare_cache_batch(self, request_slots, *, num_extends, stream):
         """Begin target KV offloading residency; ordinary arenas do nothing."""
         if self._offload_adapter is not None:
@@ -549,9 +556,8 @@ class CacheGroupRouter(AttentionBackend):
     def prepare_sparse_kv_access(self, layer, selection, positions, *, forward_mode):
         """Return offloading compute writes after loading or joining prefetch.
 
-        Extend reserves projection staging instead; sparse prefill later
-        flushes and gathers history in bounded tiles. Non-offloaded layers
-        keep their ordinary history addresses.
+        Offloaded fields accept decode only. Other fields keep their
+        ordinary history addresses.
         """
         if self._offload_adapter is not None:
             return self._offload_adapter.prepare(
@@ -741,8 +747,6 @@ class CacheGroupRouter(AttentionBackend):
                 ),
             )
             leaf.set_request_slots(req_pool_indices[:bs])
-        if self._offload_adapter is not None and num_extends:
-            self._offload_adapter.set_extend_writes(self._extend_write_locations)
 
     def refresh_decode_metadata(
         self,
@@ -1114,15 +1118,6 @@ class CacheGroupRouter(AttentionBackend):
         )
 
     def forward_sparse_prefill(self, *args, **kwargs):
-        """Attach offloading recovery tiles before dispatching sparse prefill.
-
-        Iteration flushes the projected chunk to Host, then reuses staging
-        for each gathered tile; the leaf must consume a tile before next().
-        """
-        if self._offload_adapter is not None:
-            kwargs["kv_tiles"] = self._offload_adapter.prefill_tiles(
-                kwargs["layer"], kwargs["topk_slots"]
-            )
         return self._sole_leaf("forward_sparse_prefill").forward_sparse_prefill(
             *args, **kwargs
         )

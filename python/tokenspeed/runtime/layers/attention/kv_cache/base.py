@@ -344,12 +344,8 @@ class CachePool(ABC):
         return self._build_cache_transfer_layout(field_ids, consumers)
 
     def _build_cache_transfer_layout(self, field_ids, consumers):
-        from tokenspeed.runtime.cache.transfer.layout import layout_from_lcm_plan
+        from tokenspeed.runtime.cache.transfer.layout import layout_from_cache_arena
 
-        if self.arena.storage_plan.host_bytes:
-            raise ValueError(
-                "host authoritative history does not expose an L2 device slab"
-            )
         local_group_ids = {
             field.group_id
             for field in self.arena.plan.fields
@@ -360,9 +356,8 @@ class CachePool(ABC):
             for spec in self.arena.cache_group_specs
             if spec.group_id in local_group_ids
         )
-        return layout_from_lcm_plan(
-            self.arena.plan,
-            self.arena.buffer,
+        return layout_from_cache_arena(
+            self.arena,
             consumers=consumers,
             group_ids=scheduler_group_ids or None,
             field_ids=field_ids,

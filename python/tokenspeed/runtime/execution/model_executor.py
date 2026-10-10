@@ -1978,7 +1978,7 @@ class ModelExecutor:
             ).to(self.device, non_blocking=True)
             self.runtime_states.reset_states(rows, values)
             # KV offloading tags may still describe a previous owner or a
-            # pre-recovery history view; invalidate them without erasing history.
+            # replaced history view; invalidate them without erasing history.
             self.attn_backend.invalidate_cache_residency(
                 rows, stream=self.execution_stream
             )

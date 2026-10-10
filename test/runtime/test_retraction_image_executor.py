@@ -209,7 +209,7 @@ def _snapshot_op(op_id, slot, transfers, *, pool_index=1):
         op_id=op_id,
         request_id=f"r{op_id}",
         request_pool_index=pool_index,
-        snapshot_slot=slot,
+        snapshot_slot=slot + 1,
         transfers=tuple(transfers),
     )
 
@@ -220,7 +220,7 @@ def _restore_op(op_id, slot, rows, *, pool_index=1):
         op_id=op_id,
         request_id=f"r{op_id}",
         request_pool_index=pool_index,
-        snapshot_slot=slot,
+        snapshot_slot=slot + 1,
         transfers=tuple(transfer for _, transfer in rows),
         source_tier=tuple(tier for tier, _ in rows),
     )
@@ -780,6 +780,18 @@ def test_restore_rows_need_their_tier_and_run_outside_capture():
         )
 
 
+@pytest.mark.parametrize("wire_slot", [-1, 0, 3])
+def test_snapshot_blob_slots_follow_the_one_based_scheduler_contract(wire_slot):
+    executor, _, _ = _build(
+        layout=_layout(2, [("full", 2)]), shard_counts=[1], max_retracted=2
+    )
+    op = _snapshot_op(1, wire_slot - 1, [])
+    fence = Mock()
+    with pytest.raises(IndexError, match="snapshot slot"):
+        executor.submit_write_backs([op], prerequisite_stream="s", fence_stream=fence)
+    fence.wait_event.assert_not_called()
+
+
 def test_plan_level_checks_refuse_duplicates_bad_slots_and_ragged_tiers():
     """Every op of a plan is validated before its first copy is launched: a
     bad snapshot op beside a stream-ordered L2 write-back must not leave that
@@ -804,7 +816,7 @@ def test_plan_level_checks_refuse_duplicates_bad_slots_and_ragged_tiers():
                 prerequisite_stream="s",
                 fence_stream=fence,
             )
-        with pytest.raises(IndexError, match="snapshot slot 2"):
+        with pytest.raises(IndexError, match="snapshot slot 3"):
             executor.submit_write_backs(
                 [l2_leg, _snapshot_op(1, 2, [])],
                 prerequisite_stream="s",
@@ -814,7 +826,7 @@ def test_plan_level_checks_refuse_duplicates_bad_slots_and_ragged_tiers():
         op_id=5,
         request_id="r",
         request_pool_index=1,
-        snapshot_slot=0,
+        snapshot_slot=1,
         transfers=(_transfer(0, 1, 1),),
         source_tier=(),
     )
@@ -985,7 +997,7 @@ def test_a_lane_completes_a_zero_row_copy_without_touching_the_transport(backend
     stream = Mock(name="stream")
     events = []
     launch = dict(
-        device_buffers=(SimpleNamespace(device="cuda"),),
+        device_buffers=(SimpleNamespace(device=torch.device("cuda")),),
         host_buffer="host",
         geometry=SimpleNamespace(num_field_rows=3),
         stream=stream,

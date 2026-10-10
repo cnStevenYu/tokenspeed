@@ -80,7 +80,6 @@ def test_sparse_rows_and_accepted_prefix(queries, overlap):
         cyclic_tokens=0,
         selection_consumers=(),
         device_rows=512,
-        max_extend_tokens=64,
     )
     arena = SimpleNamespace(device="cuda", field=hosts.__getitem__)
     cache = make_offload(arena, config)
@@ -160,7 +159,6 @@ def test_short_to_long_and_graph_replay():
         cyclic_tokens=0,
         selection_consumers=(),
         device_rows=512,
-        max_extend_tokens=64,
     )
     cache = make_offload(SimpleNamespace(device="cuda", field=lambda _: host), config)
     rids = torch.tensor([1], dtype=torch.int32, device="cuda")
@@ -217,7 +215,6 @@ def test_pd_short_preload(length):
         cyclic_tokens=0,
         selection_consumers=(),
         device_rows=512,
-        max_extend_tokens=64,
     )
     cache = make_offload(SimpleNamespace(device="cuda", field=lambda _: host), config)
     rids = torch.tensor([1], dtype=torch.int32, device="cuda")
@@ -264,7 +261,6 @@ def test_mtp_ring_wrap_and_rejected_kv(accepted_count, use_graph):
         cyclic_tokens=12,
         selection_consumers=(),
         device_rows=512,
-        max_extend_tokens=64,
     )
     cache = make_offload(SimpleNamespace(device="cuda", field=lambda _: host), config)
     rids = torch.tensor([1], dtype=torch.int32, device="cuda")
@@ -363,7 +359,6 @@ def test_attention_output_is_bitwise_after_relocation(queries):
         cyclic_tokens=0,
         selection_consumers=(),
         device_rows=3 * (8192 + 64),
-        max_extend_tokens=64,
     )
     cache = make_offload(SimpleNamespace(device="cuda", field=lambda _: host), config)
     rids = torch.tensor([1], device="cuda", dtype=torch.int32)
@@ -397,6 +392,7 @@ def test_attention_output_is_bitwise_after_relocation(queries):
             page_size=64,
             q_len_per_req=queries,
             solution="triton",
+            slot_order="selection",
         )
 
     expected = attend(baseline_pool, selected)
@@ -440,7 +436,6 @@ def test_fixed_pool_masks_graph_padding_and_reuses_highest_slot(overlap):
         cyclic_tokens=0,
         selection_consumers=(),
         device_rows=320,
-        max_extend_tokens=64,
     )
     cache = make_offload(SimpleNamespace(device="cuda", field=lambda _: host), config)
     requests = torch.tensor([6, 7, 7, 0], device="cuda", dtype=torch.int32)
@@ -521,7 +516,6 @@ def test_lru_multiround_oracle_and_lifecycle(queries, cyclic, overlap, graph_mod
         cyclic_tokens=cyclic,
         selection_consumers=(),
         device_rows=192,
-        max_extend_tokens=64,
     )
     cache = make_offload(SimpleNamespace(device="cuda", field=lambda _: host), config)
     state = cache.fields[name]
@@ -623,11 +617,11 @@ def test_lru_multiround_oracle_and_lifecycle(queries, cyclic, overlap, graph_mod
             cache.reset_requests(rids[:1], stream=torch.cuda.current_stream())
             rid = ids[0]
             tags[rid], orders[rid] = [-1] * stride, list(range(hot))
-    # Recovery invalidates all partitions because it reuses the shared payload.
-    cache.begin(rids[:1], num_extends=1, stream=torch.cuda.current_stream())
-    assert state.keys.eq(-1).all()
-    assert state.lru_slots.view(slots, hot).cpu().tolist() == [list(range(hot))] * slots
-    assert not state.seeded.any()
+    # Restore invalidates the new request slot without disturbing other owners.
+    cache.reset_requests(rids[:1], stream=torch.cuda.current_stream())
+    assert state.keys.view(slots, stride)[ids[0]].eq(-1).all()
+    assert state.lru_slots.view(slots, hot)[ids[0]].cpu().tolist() == list(range(hot))
+    assert not state.seeded[ids[0]]
     cache.clear()
     assert state.device.eq(0).all()
 
@@ -647,7 +641,6 @@ def test_lru_full_union_and_oldest_victim_after_hit_only_round():
         cyclic_tokens=0,
         selection_consumers=(),
         device_rows=64,
-        max_extend_tokens=16,
     )
     cache = make_offload(SimpleNamespace(device="cuda", field=lambda _: host), config)
     state = cache.fields[name]

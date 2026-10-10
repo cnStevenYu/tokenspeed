@@ -198,8 +198,9 @@ class RequestHistoryRows:
     Ownership is recorded per admission — the request's state object, held
     weakly — not per request id: clients may reuse a finished request's id,
     and a later request landing in the same slot must not inherit the row.
-    A restored request keeps its state object but lands in a new slot, so
-    the row ownership check reseeds it there.
+    A restored request can return to an earlier slot still owned by it but
+    missing the tokens computed elsewhere. Its explicit decode input forces
+    a reseed even when that slot's ownership matches.
 
     Call :meth:`seeds_for_forward` exactly once per forward the executor
     runs, in dispatch order (the executor runs forwards in that order).
@@ -221,6 +222,7 @@ class RequestHistoryRows:
         prefix_lengths: list[int] = []
         tokens: list[tuple[int, ...]] = []
         num_extends = forward_op.num_extends()
+        overrides = forward_op.decode_input_ids
         for i, rid in enumerate(forward_op.request_ids):
             slot = int(forward_op.request_pool_indices[i])
             state = rid_to_state[rid]
@@ -232,7 +234,12 @@ class RequestHistoryRows:
             boundary = (
                 int(forward_op.extend_prefix_lens[i]) if i < num_extends else total - 1
             )
-            if boundary <= 0 or held:
+            explicit_decode = (
+                i >= num_extends
+                and overrides is not None
+                and overrides[i - num_extends] != -1
+            )
+            if boundary <= 0 or (held and not explicit_decode):
                 continue
             if boundary > total:
                 raise ValueError(

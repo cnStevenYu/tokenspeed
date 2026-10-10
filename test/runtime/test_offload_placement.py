@@ -81,7 +81,6 @@ def test_segmented_host_device_contract_and_budget(prefix_granularity):
         cyclic_tokens=0,
         selection_consumers=(),
         device_rows=512,
-        max_extend_tokens=64,
     )
     arena = CacheArena(
         layout.bind(16),

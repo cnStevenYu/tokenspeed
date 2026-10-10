@@ -499,8 +499,9 @@ cache executor measures them **once**, at construction (`SlotStateLayout`:
 sizes are fixed for its lifetime), so a store or restore only slices the
 arena row at the recorded offsets and never re-measures an owner on the
 forward thread. The executor keeps a pinned arena of
-`--retraction-snapshot-max-requests` × `blob_bytes`, indexed by the op's
-`snapshot_slot`; the store exports the victim's slot on the write stream
+`--retraction-snapshot-max-requests` × `blob_bytes`. C++ snapshot slot IDs
+are 1-based; the compact blob row is `snapshot_slot - 1`. The store exports
+the victim's slot on the write stream
 (the slot is reused only behind the fence), the restore imports into the
 new slot and lets a request-keyed owner claim it. A request-keyed owner —
 the sampling backends, DSpark — prepares a slot at the request's first
@@ -511,7 +512,10 @@ occupant's rows, which are not imaged; the restore then leaves the new slot
 unclaimed and the first forward prepares it from the request's own
 parameters, as the unretracted request's would have. Token-derived rows —
 the committed-token history and the n-gram tail — are not imaged; they are
-reseeded from the control plane's token list as on any slot handoff.
+reseeded from the control plane's token list as on any slot handoff. A
+restored decode's explicit input also forces a reseed when it returns to a
+slot still owned by the same request: that row missed the tokens computed
+in another slot. Ordinary continuous decode does not reseed.
 `test/runtime/test_slot_state.py` constructs these owners (and a
 `ModelExecutor` over them) and enumerates every tensor they or their runtime
 components allocate with a slot-sized dimension, failing when one is neither
@@ -1816,9 +1820,9 @@ the coordinator's L2 prefix cache has a separate ownership contract.
 
 **Fixed hot capacity and admission.** For each offloaded field, let `S` be
 the configured request-slot capacity (including null and graph padding), `H`
-the ordinary hot rows per request, `R` the reserved/ring rows per request and
-`E` the maximum extend chunk. `compute_offload_capacity()` fixes the device
-row count to `max(S * (H + R), E + 1)`, rounded to the storage-page alignment.
+the ordinary hot rows per request and `R` the reserved/ring rows per request.
+`compute_offload_capacity()` fixes the device row count to `S * (H + R)`,
+rounded to the storage-page alignment.
 Reserved capacity is measured in token rows; page rounding applies to the
 complete allocation.
 
@@ -1840,7 +1844,7 @@ engine manages payloads and replacement state.
 `write_locations(layer, mode)` returns authoritative history destinations,
 including those used by Index-K. The model passes its canonical Top-K and
 positions to `prepare_sparse_kv_access`, which returns projection destinations:
-hot rows for decode, chunk staging rows for recovery, or ordinary history rows
+hot rows for decode, or ordinary history rows
 for a field on device. The router substitutes the prepared hot read indices
 and write locations at leaf dispatch. An offloaded compute access requires a
 prepare for the same step and forward family. Index-K and shared-selection
@@ -1859,7 +1863,7 @@ CuTeDSL hash lookup coalesces duplicate history IDs for physical loads. Unique
 misses receive destinations in first-occurrence input order, while the mapped
 attention inputs preserve order, duplicates and masks. Hash tables use shared
 memory where the kernel geometry permits it; larger tables and destination
-scratch use the planned persistent GPU workspace. Reset and recovery reset
+scratch use the planned persistent GPU workspace. Slot reuse and snapshot restore reset
 LRU; accepted-prefix writeback leaves the selection-access replacement state
 intact.
 
@@ -1884,17 +1888,23 @@ slot reuse. Batch lifecycle hooks broadcast to child backends.
 seed flags and LRU for reused slots, preserving authoritative history and
 scheduler-owned blocks. PD transfer completion gates the first seed.
 
-**Recovery and support.** Local D recovery runs as a separate all-extend batch.
-It resets hot state, projects one chunk into rows `1..E` of the fixed pool,
-and flushes all projected rows to Host before reusing that storage. Sparse
-attention gathers selected history in bounded query tiles and consumes each
-tile on the execution stream before the next tile overwrites its storage.
-The iterator clears the pending-write count after flushing; end-of-forward
-writeback skips those rows. Recovery preserves selection order, duplicates
-and masks within the configured hot allocation.
+**Snapshot retraction.** The transfer layout names the arena's physical
+regions and authoritative field offsets. Snapshot copies the complete
+history, including pinned Host fields, into the request-private Host pool;
+it never images only the hot working set. Mapped Host kernel transfers order
+Host-to-Host copies on the same stream as Device fields. Direct DMA is refused
+for mixed arenas because CPU copies would not obey the store fence.
+
+Accepted writeback is joined to execution before completion, so the snapshot
+store's execution-stream wait observes every accepted row. Restore copies
+history into fresh scheduler pages and uses the router's `SlotStateExporter`
+import to invalidate hot tags, seed flags and LRU in the destination request
+slot. Hot payloads are derived caches and are rebuilt from the restored
+history; old physical row IDs are never imported as valid tags. Offloaded
+arenas run decode only: D-role recovery prefill and its staging workspace
+are unnecessary under snapshot retraction.
 
 The LongCat2 plugin supports PD decode with PP=1, DCP=1, unsplit KV rows and
-KVStore disabled, using the target router directly. Mixed recovery/decode
-batches and mixed-arena sleep/wake are unsupported. Eager and CUDA-graph decode
+KVStore disabled, using the target router directly. Local offloaded prefill and mixed-arena sleep/wake are unsupported. Eager and CUDA-graph decode
 use the same batch, access and accepted-writeback hooks; execution details are
 in `unified_path.md`, "Sparse KV offloading".

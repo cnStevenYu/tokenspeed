@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from tokenspeed.runtime.layers.attention.kv_cache.recipes.plan import (
@@ -72,7 +72,11 @@ def select_layer_fields(
 
 @dataclass(frozen=True, slots=True)
 class CacheField:
-    """One cache field stored as block rows in a device buffer."""
+    """One authoritative field stored as block rows in an arena region.
+
+    The buffer may be Device memory or pinned Host history. The offsets
+    address the authoritative pages, never a derived hot KV buffer.
+    """
 
     field_id: str
     device_buffer_index: int
@@ -242,6 +246,52 @@ def layout_from_lcm_plan(
     )
 
 
+def layout_from_cache_arena(
+    arena,
+    *,
+    consumers: tuple[tuple[str, ...], ...],
+    group_ids: tuple[str, ...] | None,
+    field_ids: frozenset[str],
+) -> CacheTransferLayout:
+    """Bind logical field geometry to the arena's physical storage regions.
+
+    All views of an arena use the same buffer tuple and region indices, so
+    target/draft layouts can be combined without duplicating allocations.
+    Host regions describe full history, not the GPU hot working set.
+    """
+    regions = tuple(arena.regions)
+    buffers = tuple(arena.regions[name] for name in regions)
+    indices = {name: index for index, name in enumerate(regions)}
+    bindings = {b.field_id: b for b in arena.storage_plan.fields}
+    layout = layout_from_lcm_plan(
+        arena.plan,
+        buffers[0],
+        consumers=consumers,
+        group_ids=group_ids,
+        field_ids=field_ids,
+    )
+    return replace(
+        layout,
+        buffers=buffers,
+        groups=tuple(
+            replace(
+                group,
+                fields=tuple(
+                    replace(
+                        field,
+                        device_buffer_index=indices[bindings[field.field_id].region_id],
+                        device_block_zero_offset_bytes=bindings[
+                            field.field_id
+                        ].offset_bytes,
+                    )
+                    for field in group.fields
+                ),
+            )
+            for group in layout.groups
+        ),
+    )
+
+
 def combine_cache_transfer_layouts(
     target: CacheTransferLayout,
     draft: CacheTransferLayout | None,
@@ -299,10 +349,8 @@ def combine_cache_transfer_layouts(
             raise ValueError("scheduler and transfer cache groups do not match")
         ordered_group_ids = group_ids
 
-    shared_arena = (
-        len(target.buffers) == 1
-        and len(draft.buffers) == 1
-        and target.buffers[0] is draft.buffers[0]
+    shared_arena = len(target.buffers) == len(draft.buffers) and all(
+        a is b for a, b in zip(target.buffers, draft.buffers)
     )
     if not shared_arena:
         raise ValueError("target and draft cache views must share one arena")
@@ -335,13 +383,6 @@ def combine_cache_transfer_layouts(
                 "shared target/draft arena fields use conflicting layouts "
                 f"{conflicts}"
             )
-    if any(
-        field.device_buffer_index != 0
-        for layout in (target, draft)
-        for group in layout.groups
-        for field in group.fields
-    ):
-        raise ValueError("shared arena fields must use device buffer zero")
     groups = []
     for group_id in ordered_group_ids:
         target_group = target_groups.get(group_id)

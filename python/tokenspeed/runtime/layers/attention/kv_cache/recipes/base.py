@@ -138,12 +138,8 @@ class CacheRecipe(ABC):
             if policy is None
             else policy.bind(
                 request_slots=RequestSlotLayout(self.attn_config.max_bs).capacity,
-                device_rows=max(
-                    RequestSlotLayout(self.attn_config.max_bs).capacity
-                    * (policy.hot_tokens + policy.reserved_tokens),
-                    self.server_args.chunked_prefill_size + 1,
-                ),
-                max_extend_tokens=self.server_args.chunked_prefill_size,
+                device_rows=RequestSlotLayout(self.attn_config.max_bs).capacity
+                * (policy.hot_tokens + policy.reserved_tokens),
             )
         )
         if offload is not None:

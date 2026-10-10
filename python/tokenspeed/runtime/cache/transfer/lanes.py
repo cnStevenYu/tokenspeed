@@ -43,6 +43,7 @@ from tokenspeed_kernel.ops.kvcache.host_transfer import (
     HostTransferGeometry,
     HostTransferWorkspace,
     build_host_transfer_geometry,
+    cache_transfer_device,
     transfer_cache_blocks,
 )
 
@@ -124,7 +125,7 @@ def build_transfer_geometry(
         ValueError: A field appears twice, has two consumers or none, or a
             consumer names an unknown field.
     """
-    device = layout.buffers[0].device
+    device = cache_transfer_device(layout.buffers)
     fields_by_id = {}
     for group_index, group in enumerate(layout.groups):
         for field_index, field in enumerate(group.fields):
@@ -233,7 +234,9 @@ class HostTransferLane:
                     self.metadata_done = device_module.Event()
                 try:
                     self.workspace.commit_block_transfers(
-                        num_blocks, device_buffers[0].device, non_blocking=True
+                        num_blocks,
+                        cache_transfer_device(device_buffers),
+                        non_blocking=True,
                     )
                 finally:
                     # Also protect a partially submitted upload if staging

@@ -41,6 +41,9 @@ from tokenspeed.runtime.execution.types import RequestHistorySeeds
 
 
 class _ForwardOp(SimpleNamespace):
+    def __init__(self, *, decode_input_ids=None, **kwargs):
+        super().__init__(decode_input_ids=decode_input_ids, **kwargs)
+
     def num_extends(self) -> int:
         return len(self.extend_prefix_lens)
 
@@ -139,6 +142,30 @@ def test_a_reused_request_id_does_not_inherit_the_row() -> None:
     assert rows.seeds_for_forward(hit, again) == RequestHistorySeeds(
         slots=(1,), prefix_lengths=(3,), tokens=((50, 51, 52),)
     )
+
+
+def test_restore_back_to_an_earlier_slot_reseeds_new_committed_tokens() -> None:
+    rows = RequestHistoryRows()
+    state = _State(prompt_input_ids=[10, 11], output_ids=[20])
+    states = {"a": state}
+
+    def decode(slot, input_id):
+        return _ForwardOp(
+            request_ids=["a"],
+            request_pool_indices=[slot],
+            extend_prefix_lens=[],
+            decode_input_ids=[input_id],
+        )
+
+    assert rows.seeds_for_forward(decode(1, 20), states).tokens == ((10, 11),)
+    state.output_ids.extend([21, 22])
+    assert rows.seeds_for_forward(decode(2, 22), states).tokens == ((10, 11, 20, 21),)
+    state.output_ids.extend([23, 24])
+    # Slot 1 still names this request, but missed the forwards on slot 2.
+    assert rows.seeds_for_forward(decode(1, 24), states) == RequestHistorySeeds(
+        slots=(1,), prefix_lengths=(6,), tokens=((10, 11, 20, 21, 22, 23),)
+    )
+    assert rows.seeds_for_forward(decode(1, -1), states) is None
 
 
 def test_seed_prefix_must_exist() -> None:

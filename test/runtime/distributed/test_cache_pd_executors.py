@@ -1901,6 +1901,7 @@ def test_every_sharded_prefill_rank_serves_every_decode_rank() -> None:
             )
         )
 
+
 def test_bootstrap_layout_excludes_rank_local_field_addresses():
     from dataclasses import replace
 

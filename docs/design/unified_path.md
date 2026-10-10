@@ -1003,7 +1003,7 @@ and the model forward chains above the attention layers carry no
 `out_cache_loc` parameter; `InputBuffers` has no location buffer;
 `fill_input_buffers` takes no table. For sparse KV offloading, the model
 prepares canonical Top-K IDs and positions with `prepare_sparse_kv_access`
-before writing latent KV to the returned hot or recovery-staging slots.
+before writing latent KV to the returned hot slots.
 `KVOffloadAdapter` retains these mappings for prologue and router leaf access,
 requiring preparation for the same step and forward family. Index-K uses
 history destinations through `write_locations`.
@@ -1827,15 +1827,15 @@ buffers and GPU inputs. Offloading requires no CPU read of accepted lengths
 or sequence lengths. Null and padding requests install no tags and commit
 no KV rows.
 
-When PD admission or local recovery resets valid history lengths,
+When PD landing resets valid history lengths or a snapshot is restored,
 `invalidate_cache_residency` runs outside graph execution. It fences prefetch
 and writeback streams and resets request-slot tags, seed flags and LRU while
 preserving authoritative history. PD transfer completion precedes seeding.
 Here residency means the hot-cache contents managed by the arena's offload
 engine; the router adapter holds the compute mappings for accessing them.
 
-Local recovery uses a separate all-extend batch. It projects the current chunk
-into a bounded prefix of the same hot allocation, flushes that chunk to Host,
-then gathers attention tiles whose storage is reused only after consumption
-on the execution stream. Already flushed rows are excluded from the final
-writeback. Mixed recovery/decode batches are unsupported.
+Snapshot stores include authoritative Host history and observe accepted
+writeback through the execution-stream fence. Restores copy the image into
+fresh pages and invalidate the destination slot's derived hot metadata via
+the router's slot-state import. The next decode seeds or loads the restored
+Host rows. No recovery prefill or extend staging is used by offloaded arenas.

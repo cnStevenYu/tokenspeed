@@ -53,7 +53,39 @@ class MooncakeEmbeddingManagerPrefill(MooncakeEmbeddingManagerBase):
         self.response_tracker: dict[int, set] = {}
         self.connection_pool: dict[str, list] = {}
         self.prefill_parallel_info: dict[str, dict] = {}
+        self._room_lock = threading.Lock()
         self._start_status_thread()
+
+    def claim_room(self, room: int) -> bool:
+        """A room identifies one receive buffer, never two concurrent requests."""
+        with self._room_lock:
+            if room in self.request_status:
+                return False
+            self.update_status(room, TransferPoll.Bootstrapping)
+            return True
+
+    def clear_room(self, room: int) -> None:
+        """Remove a completed receive without racing the status thread."""
+        with self._room_lock:
+            self.request_status.pop(room, None)
+            self.required_response_num.pop(room, None)
+            self.response_tracker.pop(room, None)
+            with self.failure_lock:
+                self.failure_records.pop(room, None)
+
+    def _handle_status(self, room: int, status: int, rank: int) -> None:
+        with self._room_lock:
+            # A late frame must not recreate a room after its owner cleared it.
+            if room not in self.request_status:
+                return
+            if status == TransferPoll.Success:
+                responses = self.response_tracker.setdefault(room, set())
+                responses.add(rank)
+                if len(responses) >= self.required_response_num.get(room, 1):
+                    self.update_status(room, TransferPoll.Success)
+            elif status == TransferPoll.Failed:
+                self.record_failure(room, "encode failed to send embedding")
+                self.update_status(room, TransferPoll.Failed)
 
     def _start_status_thread(self):
         self.rank_port = get_free_port()
@@ -65,14 +97,6 @@ class MooncakeEmbeddingManagerPrefill(MooncakeEmbeddingManagerBase):
                 room = int(parts[0].decode("ascii"))
                 status = int(parts[1].decode("ascii"))
                 rank = int(parts[2].decode("ascii"))
-                if status == TransferPoll.Success and room in self.request_status:
-                    self.response_tracker.setdefault(room, set()).add(rank)
-                    if len(
-                        self.response_tracker[room]
-                    ) >= self.required_response_num.get(room, 1):
-                        self.update_status(room, TransferPoll.Success)
-                elif status == TransferPoll.Failed:
-                    self.record_failure(room, "encode failed to send embedding")
-                    self.update_status(room, TransferPoll.Failed)
+                self._handle_status(room, status, rank)
 
         threading.Thread(target=loop, daemon=True).start()

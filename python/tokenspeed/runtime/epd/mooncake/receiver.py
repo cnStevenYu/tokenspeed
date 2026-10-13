@@ -86,7 +86,15 @@ class MooncakeEmbeddingReceiver:
         self.bootstrap_addr = bootstrap_addr
         self.bootstrap_room = bootstrap_room
         self.session_id = mgr.get_session_id()
-        mgr.update_status(bootstrap_room, TransferPoll.Bootstrapping)
+        self._terminal_status: int | None = None
+        self._owns_room = mgr.claim_room(bootstrap_room)
+        if not self._owns_room:
+            # Retrying the P/D legs must mint a new encode room too. Sharing an
+            # active room would redirect the transfer into a second buffer and
+            # let one request's cleanup remove the other's status.
+            self._terminal_status = TransferPoll.Failed
+            logger.error(f"EPD receive room {bootstrap_room} is already in use")
+            return
 
         pinfo = mgr.prefill_parallel_info.get(bootstrap_addr)
         if pinfo is None or pinfo.get("prefill_tp_size") is None:
@@ -210,15 +218,27 @@ class MooncakeEmbeddingReceiver:
                 sock.send_multipart(ti.to_zmq())
 
     def poll(self) -> int:
-        return self.mgr.check_status(self.bootstrap_room)
+        if self._terminal_status is not None:
+            return self._terminal_status
+        status = self.mgr.room_status(self.bootstrap_room)
+        if status is None:
+            logger.error(f"EPD receive room {self.bootstrap_room} lost its status")
+            status = TransferPoll.Failed
+            self._terminal_status = status
+        return status
 
     def clear(self) -> None:
         """Drop this room's bookkeeping from the (singleton) prefill manager on a
         terminal receive, else every request leaks its status/tracker entries.
         Mirrors the KV receiver; called post-terminal so it can't race check_status."""
-        room = self.bootstrap_room
-        self.mgr.request_status.pop(room, None)
-        self.mgr.required_response_num.pop(room, None)
-        self.mgr.response_tracker.pop(room, None)
-        with self.mgr.failure_lock:
-            self.mgr.failure_records.pop(room, None)
+        if not self._owns_room:
+            return
+        if self._terminal_status is None:
+            status = self.mgr.room_status(self.bootstrap_room)
+            self._terminal_status = (
+                status
+                if status in (TransferPoll.Success, TransferPoll.Failed)
+                else TransferPoll.Failed
+            )
+        self.mgr.clear_room(self.bootstrap_room)
+        self._owns_room = False

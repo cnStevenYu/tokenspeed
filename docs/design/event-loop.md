@@ -157,6 +157,14 @@ Consequences:
   through tensor indexing can stage a CPU tensor and introduce a hidden
   synchronous H2D copy, blocking further forward launches.
 
+Each encode room belongs to one prefill receive buffer. An overlapping retry
+using an active room fails locally without changing the original receive's
+status or cleanup. Upstream retries must dispatch a fresh encode attempt and
+room; a completed encode transfer is not a replayable P/D request body. Room
+cleanup and status-frame handling are serialized, and late frames for a
+cleared room are ignored. Polling a receiver after cleanup returns its terminal
+status rather than looking up removed manager state.
+
 A thread-local dispatch mode over the loop also enforces the rule
 mechanically, on by default: it raises on any CUDA tensor op run from the
 control thread. Event waits — the inbound channel — and metadata-only view

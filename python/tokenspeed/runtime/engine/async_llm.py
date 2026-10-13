@@ -325,7 +325,13 @@ class AsyncLLM(SchedulerControlClient, EngineClient):
         self.rid_to_state[obj.rid] = state
         mm_inputs = getattr(tokenized_obj, "multimodal_inputs", None)
         if mm_inputs is not None:
-            mm_inputs.publish_shm_features()
+            if self.server_args.nnodes > 1 and self.server_args.mapping.attn.has_dp:
+                # DP routing can select a host with no access to this process's
+                # POSIX SHM. Carry tensor bytes until the receiving TP leader
+                # publishes them in the destination host's SHM namespace.
+                mm_inputs.materialize_shm_features()
+            else:
+                mm_inputs.publish_shm_features()
         self.engine_core_client.send_to_scheduler.send_pyobj(tokenized_obj)
 
     def submit_encode(self, encode_request) -> None:

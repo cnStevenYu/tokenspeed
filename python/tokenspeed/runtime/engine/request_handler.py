@@ -345,6 +345,11 @@ class RequestHandler:
                     recv_req = self.recv_func.recv_pyobj(zmq.NOBLOCK)
                 except zmq.ZMQError:
                     break
+                mm_inputs = getattr(recv_req, "multimodal_inputs", None)
+                if mm_inputs is not None:
+                    # Inline tensors may have crossed a host boundary through
+                    # the DP controller. Publish locally before TP broadcast.
+                    mm_inputs.publish_shm_features()
                 recv_reqs.append(recv_req)
         else:
             recv_reqs = None

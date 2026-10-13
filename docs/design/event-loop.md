@@ -157,6 +157,13 @@ Consequences:
   through tensor indexing can stage a CPU tensor and introduce a hidden
   synchronous H2D copy, blocking further forward launches.
 
+With attention DP across multiple hosts, frontend feature tensors travel as
+bytes through the existing request IPC until they reach the selected TP leader.
+That leader publishes host-local SHM before broadcasting the request. Publishing
+only on the frontend host would leave remote DP groups with handles that none of
+their ranks can open. Same-host ingress and TP groups spanning hosts retain the
+existing SHM reachability and encoder feature transport.
+
 Each encode room belongs to one prefill receive buffer. An overlapping retry
 using an active room fails locally without changing the original receive's
 status or cleanup. Upstream retries must dispatch a fresh encode attempt and

@@ -274,6 +274,17 @@ class MultimodalInputs(msgspec.Struct, eq=False, kw_only=True, array_like=True):
             if item.feature_shm is not None:
                 item.feature_shm.attach()
 
+    def materialize_shm_features(self) -> None:
+        """Replace local handles with CPU tensors before cross-host routing."""
+        for item in self.mm_items:
+            handle = item.feature_shm
+            if handle is not None:
+                handle.attach()
+                feature = torch.empty(handle.shape, dtype=handle.dtype, device="cpu")
+                handle.copy_into(feature)
+                item.feature_shm = None
+                item.feature = feature
+
     def release_shm_features(self) -> None:
         for item in self.mm_items:
             if item.feature_shm is not None:

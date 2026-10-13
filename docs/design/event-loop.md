@@ -177,6 +177,18 @@ broadcasts on the same issuing thread as the model's collectives, restoring
 the cross-rank launch-order guarantee the old non-overlap-loop assumption
 provided.
 
+With pipeline parallelism, only PP0 receives encoder payloads and reserves
+the receive pool. PP0's attention TP group first agrees on completion;
+`PipelineEpdPrefillAdmission` then broadcasts admitted/failed request IDs
+along the pipeline CPU groups. Every stage submits the same requests in
+the same loop iteration, while later stages hold no encoder receiver or
+payload. Decode does not build this admission controller.
+
+The encoder's TP ranks attach every pixel-SHM segment in a received batch
+before any rank submits it to the encode worker. A CPU-group rendezvous
+protects this ownership transition: submission consumes and unlinks SHM
+on both cache hits and misses, so broadcasting handles alone is insufficient.
+
 The symmetric rule holds on the data plane: **the forward thread never
 synchronizes with the device on the per-round path.** Every host
 synchronization it performs — `.cpu()`, `.item()`, `.tolist()`,
